@@ -119,6 +119,7 @@ struct SettingsView: View {
     @Environment(\.aks) private var theme
     @State private var confirmReset = false
     @State private var exported: String?
+    @State private var showVideoSheet = false
 
     var body: some View {
         ScrollView {
@@ -223,12 +224,18 @@ struct SettingsView: View {
                                 if let url = state.exportCSV() { exported = url.path }
                             }
                             .buttonStyle(AKSPrimaryButtonStyle(filled: false))
+                            TrajectoryExportMenu(showVideoSheet: $showVideoSheet)
                             Spacer()
                             Button("清空全部数据") { confirmReset = true }
                                 .buttonStyle(AKSPrimaryButtonStyle(danger: true))
                         }
                         if let exported {
                             Text("已导出到 \(exported)")
+                                .font(AKSFont.sans(11))
+                                .foregroundColor(theme.inkSoft)
+                        }
+                        if let note = state.trajectoryExportNote {
+                            Text(note)
                                 .font(AKSFont.sans(11))
                                 .foregroundColor(theme.inkSoft)
                         }
@@ -245,6 +252,10 @@ struct SettingsView: View {
             Button("清空", role: .destructive) { state.resetAll() }
         } message: {
             Text("所有每日计数与触控板轨迹都会被删除。")
+        }
+    
+        .sheet(isPresented: $showVideoSheet) {
+            TrajectoryVideoSheet(isPresented: $showVideoSheet)
         }
     }
 

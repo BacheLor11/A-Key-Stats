@@ -27,7 +27,6 @@ struct DashboardView: View {
                             .labelsHidden()
                             .frame(width: 132)
                             .help("决定概览里触控板和鼠标怎么显示")
-                            HeatLegend()
                         }
                     )
                 )
@@ -63,6 +62,7 @@ struct DashboardView: View {
                                              counts: stats.keys,
                                              showLabels: false)
                                 .frame(height: 168)
+                            HeatScaleBar(info: .forKeys(stats.keys), compact: true)
                             AKSHairline()
                             Text("最高频 \(state.currentTopKeys.first?.label ?? "—") · \(AppState.shortNumber(state.currentTopKeys.first?.count ?? 0)) 次")
                                 .font(AKSFont.sans(11))
@@ -79,6 +79,7 @@ struct DashboardView: View {
                                                  progress: 1,
                                                  showTrail: false)
                                     .frame(height: 168)
+                                HeatScaleBar(info: .forGrid(stats.padGrid), compact: true)
                                 AKSHairline()
                                 Text("接触 \(AppState.shortNumber(stats.padContacts)) 帧 · 峰值面积 \(String(format: "%.2f", stats.padMaxContact))")
                                     .font(AKSFont.sans(11))
@@ -98,6 +99,7 @@ struct DashboardView: View {
                                               rightClicks: stats.clicks.right,
                                               showLabels: false)
                                     .frame(height: 168)
+                                HeatScaleBar(info: .forGrid(stats.mouseGrid), compact: true)
                                 AKSHairline()
                                 Text("点击 \(AppState.shortNumber(stats.clickTotal)) · 滚轮 \(AppState.shortNumber(stats.clicks.scroll))")
                                     .font(AKSFont.sans(11))
@@ -297,8 +299,11 @@ struct KeyboardPage: View {
                 )
 
                 AKSCard(padding: 20) {
-                    KeyboardHeatView(layout: state.layout, counts: state.today.keys)
-                        .frame(height: state.layoutID == .ansiFull ? 250 : 236)
+                    VStack(alignment: .leading, spacing: 14) {
+                        KeyboardHeatView(layout: state.layout, counts: state.today.keys)
+                            .frame(height: state.layoutID == .ansiFull ? 250 : 236)
+                        HeatScaleBar(info: .forKeys(state.today.keys))
+                    }
                 }
 
                 HStack(alignment: .top, spacing: 18) {
@@ -331,6 +336,7 @@ struct KeyboardPage: View {
 struct TrackpadPage: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.aks) private var theme
+    @State private var showVideoSheet = false
 
     var body: some View {
         ScrollView {
@@ -339,7 +345,27 @@ struct TrackpadPage: View {
                     kicker: "Trackpad",
                     title: "手指在板子上磨出的形状",
                     lede: "热力来自真实接触点（MultitouchSupport 逐帧读取），轨迹是降采样后的原始路径。",
-                    trailing: AnyView(HeatLegend())
+                    trailing: AnyView(
+                        HStack(spacing: 12) {
+                            if state.isExportingVideo {
+                                HStack(spacing: 7) {
+                                    ProgressView(value: state.videoProgress)
+                                        .progressViewStyle(.linear)
+                                        .frame(width: 84)
+                                    Text("渲染 \(Int(state.videoProgress * 100))%")
+                                        .font(AKSFont.mono(10))
+                                        .foregroundColor(theme.inkSoft)
+                                }
+                            } else if let note = state.trajectoryExportNote ?? state.videoExportNote {
+                                Text(note)
+                                    .font(AKSFont.sans(10.5))
+                                    .foregroundColor(theme.inkSoft)
+                                    .lineLimit(2)
+                                    .frame(maxWidth: 190, alignment: .trailing)
+                            }
+                            TrajectoryExportMenu(showVideoSheet: $showVideoSheet)
+                        }
+                    )
                 )
 
                 HStack(alignment: .top, spacing: 18) {
@@ -350,6 +376,7 @@ struct TrackpadPage: View {
                                              progress: state.replayProgress,
                                              showTrail: state.showTrail)
                                 .frame(height: 360)
+                            HeatScaleBar(info: .forGrid(state.today.padGrid))
                             HStack(spacing: 12) {
                                 Toggle("叠加轨迹", isOn: $state.showTrail)
                                     .toggleStyle(.switch)
@@ -417,6 +444,10 @@ struct TrackpadPage: View {
             }
             .padding(26)
         }
+    
+        .sheet(isPresented: $showVideoSheet) {
+            TrajectoryVideoSheet(isPresented: $showVideoSheet)
+        }
     }
 
     private func kindText(_ kind: MTDeviceInfo.Kind) -> String {
@@ -429,9 +460,55 @@ struct TrackpadPage: View {
     }
 
     private func byteText(_ bytes: Int) -> String {
-        if bytes > 1_048_576 { return String(format: "%.1f MB", Double(bytes) / 1_048_576) }
-        if bytes > 1024 { return String(format: "%.0f KB", Double(bytes) / 1024) }
-        return "\(bytes) B"
+        AppState.byteText(bytes)
+    }
+}
+
+/// 「导出轨迹」下拉：今天 / 最近 7 天 / 全部历史
+struct TrajectoryExportMenu: View {
+    @EnvironmentObject private var state: AppState
+    @Environment(\.aks) private var theme
+
+    @Binding var showVideoSheet: Bool
+
+    var body: some View {
+        Menu {
+            Section("视频") {
+                Button("导出回放视频…") { showVideoSheet = true }
+                    .disabled(state.videoDays.isEmpty)
+            }
+            Section("CSV（0–1 归一化坐标）") {
+                ForEach(TrajectoryExport.Scope.allCases) { scope in
+                    Button(scope.title) { state.exportTrajectory(scope) }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                if state.isExportingTrajectory {
+                    ProgressView().controlSize(.small).scaleEffect(0.65).frame(width: 12, height: 12)
+                } else {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
+                Text(state.isExportingTrajectory ? "导出中…" : "导出轨迹")
+                    .font(AKSFont.sans(12.5, weight: .medium))
+            }
+            .foregroundColor(theme.accent)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 5.5)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(theme.accent.opacity(theme.isDark ? 0.18 : 0.06))
+                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(theme.accent.opacity(theme.isDark ? 0.35 : 0.22), lineWidth: 1))
+            )
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(state.isExportingTrajectory || state.isExportingVideo)
+        .help("导出回放视频，或把原始轨迹导成 CSV")
     }
 }
 
@@ -447,8 +524,7 @@ struct MousePage: View {
                 AKSPageHeader(
                     kicker: "Mouse",
                     title: "鼠标也不只是点了多少下",
-                    lede: "Magic Mouse 整块上表面都是电容面，接触点同样能读到。",
-                    trailing: AnyView(HeatLegend())
+                    lede: "Magic Mouse 整块上表面都是电容面，接触点同样能读到。"
                 )
 
                 HStack(alignment: .top, spacing: 18) {
@@ -458,6 +534,7 @@ struct MousePage: View {
                                           leftClicks: state.today.clicks.left,
                                           rightClicks: state.today.clicks.right)
                                 .frame(height: 340)
+                            HeatScaleBar(info: .forGrid(state.today.mouseGrid))
                             HStack(spacing: 22) {
                                 Label("左键 \(state.today.clicks.left)", systemImage: "cursorarrow.click")
                                 Label("右键 \(state.today.clicks.right)", systemImage: "cursorarrow.click.2")
@@ -499,5 +576,114 @@ struct MousePage: View {
             }
             .padding(26)
         }
+    }
+}
+
+// MARK: - 回放视频设置
+
+/// 导出前的小面板：选哪一天、放多长。
+/// 默认「跟回放一致」—— 就是 App 里点「回放」看到的那个节奏，不改变观感。
+struct TrajectoryVideoSheet: View {
+    @EnvironmentObject private var state: AppState
+    @Environment(\.aks) private var theme
+    @Binding var isPresented: Bool
+
+    @State private var day = ""
+    @State private var durationTag = "auto"
+
+    private let options: [(tag: String, title: String, value: Double?)] = [
+        ("auto", "跟回放一致（自动）", nil),
+        ("15", "15 秒", 15),
+        ("30", "30 秒", 30),
+        ("60", "60 秒", 60)
+    ]
+
+    private var days: [String] {
+        let list = state.videoDays
+        return list.isEmpty ? [DayKey.of(Date())] : list
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("导出回放视频")
+                    .font(AKSFont.serif(19))
+                    .foregroundColor(theme.ink)
+                Text("把触控板页的回放录成 MP4（1600 × 1150），画面里只有那块触控板。")
+                    .font(AKSFont.sans(11.5))
+                    .foregroundColor(theme.inkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            AKSHairline()
+
+            HStack {
+                Text("哪一天").font(AKSFont.sans(12)).foregroundColor(theme.inkSoft)
+                Spacer()
+                Picker("", selection: $day) {
+                    ForEach(days, id: \.self) { value in
+                        Text(value).tag(value)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 176)
+            }
+
+            HStack {
+                Text("放多长").font(AKSFont.sans(12)).foregroundColor(theme.inkSoft)
+                Spacer()
+                Picker("", selection: $durationTag) {
+                    ForEach(options, id: \.tag) { option in
+                        Text(option.title).tag(option.tag)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 176)
+            }
+
+            Text("自动时长 = 这段时间的跨度 ÷ 8，最短 1.2 秒、最长 12 秒 —— 和点「回放」时看到的节奏完全一致。")
+                .font(AKSFont.sans(10))
+                .foregroundColor(theme.inkSoft.opacity(0.72))
+                .lineSpacing(2.5)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button("取消") { isPresented = false }
+                    .buttonStyle(AKSPrimaryButtonStyle(filled: false))
+                Button("导出…") {
+                    let value = options.first { $0.tag == durationTag }?.value
+                    let target = day
+                    isPresented = false
+                    // 等 sheet 收完再弹保存面板，否则面板会被 sheet 挡住
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        state.exportVideo(day: target, duration: value)
+                    }
+                }
+                .buttonStyle(AKSPrimaryButtonStyle())
+                .disabled(day.isEmpty || state.isExportingVideo)
+            }
+        }
+        .padding(22)
+        .frame(width: 420)
+        .background(theme.surface)
+        .onAppear {
+            if day.isEmpty { day = days.first ?? DayKey.of(Date()) }
+        }
+    }
+}
+
+/// 只给离屏快照用：把上面那个面板单独拎出来，带主题渲一张。
+public struct TrajectoryVideoSheetPreview: View {
+    @Environment(\.colorScheme) private var scheme
+
+    public init() {}
+
+    public var body: some View {
+        let theme = AKSScheme.of(scheme)
+        TrajectoryVideoSheet(isPresented: .constant(true))
+            .environment(\.aks, theme)
+            .padding(28)
+            .background(theme.bg)
     }
 }

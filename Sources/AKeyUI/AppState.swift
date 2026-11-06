@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 import AKeyKit
 
 /// 偏好设置统一走这一个域。
@@ -82,6 +83,14 @@ public final class AppState: ObservableObject {
     /// 被去重挡掉的重复上报（键盘一次按下发了两遍的情况）
     @Published public private(set) var dedupedKeyEvents = 0
     @Published public private(set) var unmappedKeyCount = 0
+    /// 轨迹导出的一行结果提示
+    @Published public private(set) var trajectoryExportNote: String?
+    @Published public private(set) var isExportingTrajectory = false
+    /// 轨迹回放视频：渲染进度（0–1）
+    @Published public private(set) var isExportingVideo = false
+    @Published public private(set) var videoProgress: Double = 0
+    @Published public private(set) var videoExportNote: String?
+    private var videoProgressMark = -1
 
     /// 概览页当前看的周期
     @Published public var statsPeriod: StatsPeriod = .today {
@@ -318,6 +327,122 @@ public final class AppState: ObservableObject {
         } catch {
             return nil
         }
+    }
+
+    // MARK: 轨迹导出
+
+    /// 把触控板原始轨迹导成 CSV（date,time,t,x,y,finger）。
+    ///
+    /// 采集用的是 4KB 缓冲，缓冲里可能还压着几百个点没落盘 —— 先 flush，
+    /// 否则导出的文件总是少最后几秒，看起来像丢数据。
+    public func exportTrajectory(_ scope: TrajectoryExport.Scope) {
+        guard !isExportingTrajectory else { return }
+        engine.flush()
+
+        let panel = NSSavePanel()
+        panel.title = "导出触控板轨迹"
+        panel.message = "CSV 列：date, time, t, x, y, finger。x / y 是 0–1 归一化坐标。"
+        panel.nameFieldStringValue = "A-Key-Stats-轨迹-\(scope.fileTag)-\(today.date).csv"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let days = TrajectoryExport.dates(for: scope, today: today.date)
+        isExportingTrajectory = true
+        trajectoryExportNote = "正在导出 \(days.count) 天…"
+
+        Task {
+            do {
+                let outcome = try await Task.detached(priority: .userInitiated) {
+                    try TrajectoryExport.writeCSV(days: days, kind: .pad, to: url)
+                }.value
+                isExportingTrajectory = false
+                trajectoryExportNote = "已导出 \(outcome.points.formatted()) 点 · \(outcome.days) 天 · \(Self.byteText(outcome.bytes))"
+            } catch {
+                isExportingTrajectory = false
+                trajectoryExportNote = (error as? LocalizedError)?.errorDescription ?? "导出失败"
+            }
+        }
+    }
+
+    // MARK: 轨迹回放视频
+
+    /// 有轨迹文件的日子，新的在前。视频只能按天出 —— 跨天拼接没有意义，
+    /// 轨迹点的 t 是当天 0 点起的秒数。
+    public var videoDays: [String] {
+        Store.shared.trajectoryDays(kind: .pad).sorted(by: >)
+    }
+
+    /// 把触控板页的回放原样录成 MP4。
+    ///
+    /// 画面就是那块 TrackpadHeatView：热力底图 + 双层描边的轨迹，
+    /// 推进节奏也沿用 App 的规则（按点数均匀，时长＝跨度÷8，限 1.2–12 秒）。
+    public func exportVideo(day: String, duration: Double?) {
+        guard !isExportingVideo else { return }
+        engine.flush()
+
+        let panel = NSSavePanel()
+        panel.title = "导出轨迹回放视频"
+        panel.message = "按触控板页的回放原样录成 MP4（1600 × 1150）。"
+        panel.nameFieldStringValue = "A-Key-Stats-回放-\(day).mp4"
+        panel.allowedContentTypes = [.mpeg4Movie]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        var config = TrajectoryVideo.Config()
+        config.duration = duration
+        config.dark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+
+        isExportingVideo = true
+        videoProgress = 0
+        videoProgressMark = -1
+        videoExportNote = "正在渲染回放…"
+
+        // 渲染是在后台线程跑几百帧，进度得回主线程。
+        // 不用 Task.detached：那条路要把 self 捕获进 @Sendable 闭包，
+        // 而 AppState 是 @MainActor 隔离的，编译器会拦。
+        let target = self
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let outcome = try TrajectoryVideo.render(day: day, to: url, config: config) { value in
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated { target.reportVideoProgress(value) }
+                    }
+                }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { target.finishVideo(outcome) }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { target.failVideo(error) }
+                }
+            }
+        }
+    }
+
+    private func reportVideoProgress(_ value: Double) {
+        let mark = Int(value * 100)
+        guard mark != videoProgressMark else { return }
+        videoProgressMark = mark
+        videoProgress = value
+    }
+
+    private func finishVideo(_ outcome: TrajectoryVideo.Outcome) {
+        isExportingVideo = false
+        videoProgress = 1
+        let length = String(format: "%.1f", outcome.seconds)
+        let mode = outcome.automaticDuration ? "跟回放一致" : "自定时长"
+        videoExportNote = "已导出 \(length) 秒（\(mode)）· \(Self.byteText(outcome.bytes))"
+    }
+
+    private func failVideo(_ error: Error) {
+        isExportingVideo = false
+        videoExportNote = (error as? LocalizedError)?.errorDescription ?? "渲染失败"
+    }
+
+    public static func byteText(_ bytes: Int) -> String {
+        if bytes >= 1_048_576 { return String(format: "%.1f MB", Double(bytes) / 1_048_576) }
+        if bytes >= 1024 { return String(format: "%.0f KB", Double(bytes) / 1024) }
+        return "\(bytes) B"
     }
 
     public func startReplay() {

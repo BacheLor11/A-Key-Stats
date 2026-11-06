@@ -126,3 +126,158 @@ ImageGen 出 1024 原图（奶油底 + 墨蓝键帽 + 一颗赭石），`Scripts
 **顺手修的**
 `KeyRankList` 的数字列原来只有 46pt，累计到七位数（1,313,650）会折成两行，
 加宽到 66pt 并允许缩放到 0.65。
+
+## v0.3.3 色阶刻度 + 轨迹导出
+
+**为什么图例要带刻度**
+三个视图上色的口径都是 `f = pow(value / peak, gamma)` 再交给 `AKSScheme.heat(f)`。
+原来页头那条「少 → 多」的渐变只是把 `heat()` 采样几个点，等于什么都没说：
+深蓝到赭石之间夹了一个 `pow`，颜色深浅和次数根本不成正比，换个周期 `peak` 又变了。
+
+所以 `HeatScaleInfo` 把口径收拢成一处：
+`peak`（键盘取 max，接触面取 95 分位）、`gamma`（0.45 / 0.5）、`unit`。
+图例把 f 反算回数值：`value = peak * f^(1/gamma)`。这样刻度和色块用的是同一组参数，
+改归一化方式时不会出现「图变了、图例没跟上」。
+
+中间那个刻度特意取 `pivot = 0.55` 处的值 —— 那正是 `heat()` 从墨蓝切到赭石的临界点，
+条上也在同一位置画了一条细线。于是「颜色开始偏红 = 多少次」一眼可读，比标个中位数有用得多。
+
+**渐变条用 Canvas 逐段填，不用 LinearGradient**
+`heat()` 是一条带幂次的折线（0→0.55 走冷到墨蓝，0.55→1 走墨蓝到赭石），
+`sRGB` 空间里的线性插值会在中段偏色。64 段填色，视觉上和键帽完全一致，成本可以忽略。
+
+**紧凑模式**
+概览三张小卡最窄只有 196pt（触控板 286、鼠标 196）。`compact` 只是把条压到 6pt、
+字号压到 8.5、去掉说明行，三个刻度保留 —— 少了中间刻度就退化成「猜」。
+
+**轨迹导出为什么流式**
+一天的 `pad.bin` 几百 KB ~ 几十 MB，全部历史几百万个点。`TrajectoryWriter.read` 有 `limit`（默认 20 万），
+拿它导出会静默截断。所以另写了 `TrajectoryExport.forEachPoint`：
+按 1MB 分块读、按记录长度对齐解码、**余下的半条记录留到下一块**，永远不把整个文件读进内存。
+v1（8B/点，无 id）和 v2（10B/点）都认，导出时 v1 的 finger 一律写 0。
+
+写 CSV 也一样：攒 256KB 就 `write`，内存峰值和总点数无关。
+表头是英文列名（`date,time,t,x,y,finger`），不写 BOM —— 加了 BOM 会让 pandas 读出个带 `\ufeff` 的列名。
+
+**导出前必须 flush**
+采集缓冲是 4KB，里面可能压着最后几百个点。不 flush 就导出，文件尾总是少几秒，
+用户会以为丢数据。`AppState.exportTrajectory` 第一行就是 `engine.flush()`。
+
+**空白天不进导出**
+只导真有 `.pad.bin` 的日期。空白天导出来只有表头，看起来像坏了；
+一个都没有时直接抛 `noTrajectory`，界面显示「这段时间还没有轨迹数据」。
+
+自检：`./.build/release/AKeyStats --export-traj /tmp/x.csv`，
+本机 6 天数据导出 76,891 点 / 4.0 MB，头尾时间戳与 `t` 换算一致。
+
+## v0.4.0 轨迹回放导出视频
+
+### 先说为什么返工
+
+第一版我把视频当成「一张海报」来做：大留白、左上日期、右上时钟、底部进度条和里程、
+结尾热力淡入、当前触点光点。技术上跑通了，但方向错了 —— 用户要的是
+**把 App 里点「回放」看到的那块东西录下来**，不是重新设计一个画面。
+
+返工后把画布、热力、双层描边、角标全部对齐 `TrackpadHeatView`，
+推进节奏也对齐 `AppState.startReplay`，画面里不出现任何 App 里没有的东西。
+教训：这类「导出」需求默认是 WYSIWYG，加信息量要先问。
+
+### 复用回放的三个口径
+
+1. **推进**：App 是 `trailLimit = points.count * progress`，按**点位索引**均匀走，
+   不是按真实时间。所以 Painter 里也只算 `progress = frame / (frames - 1)` 再乘点数。
+2. **时长**：`min(max(span / 8, 1.2), 12)`。和 `startReplay` 里同一行公式，
+   抽成 `Config.autoDuration(span:)` 以免两处漂移。
+3. **线宽**：App 里是 2.4 / 0.95 pt，但那是在 360pt 高的组件里。
+   视频里触控板高 1038px，所以 `s = padHeight / 360`，线宽、字号、内圈 inset 全部乘 s。
+   不乘的话放大近 3 倍后线会细得像划痕。
+
+### 双层累积位图，而不是「每帧重画全部路径」
+
+每帧重画 4.7 万个点会是 O(帧数 × 点数)，实测不可接受。
+所以沿用增量思路：只把「上一帧之后新增的点」画进累积位图。
+
+但有个陷阱 —— **累积层会让 alpha 饱和**。
+App 里每帧重画一次，同一条线只描一遍，`accent2.opacity(0.45)` 就是 0.45；
+累积层里同一处被后续批次反复描，实色会一直堆到不透明，最后糊成一片。
+
+解法是把双层描边拆成两张位图：
+- `wideLayer`：用背景色描 2.4×s 的宽边（作用是给轨迹"挖"掉热力）
+- `thinLayer`：用赭石描 0.95×s 的细线
+
+两张都画**实色**，合成时才给整体 alpha（宽边 0.70、细线 0.45~0.85）。
+这样每条线等效于「以固定透明度画一次」，和 App 每帧重画的结果一致，不会越叠越黑。
+
+细线的透明度还沿用 App 的规则：按出现过的 finger id 数量 `>40 → 0.45 / >12 → 0.65 / else 0.85`。
+
+### 热力底图预渲染
+
+`makeHeatLayer` 把 32×24 的格子一次性填成一张 CGImage，之后每帧 `draw(image)`。
+原来每帧现画 768 个格子，600 帧白花十几秒，而且每帧的浮点结果一样。
+
+注意格子的 y 要用 `size.height - (row + 1) * ch` —— CGContext 原点在左下，
+而 HeatGrid 的 row 0 是顶部。
+
+### 编码
+
+`AVAssetWriter` + `AVAssetWriterInputPixelBufferAdaptor`，像素格式 32BGRA，
+`CGContext(bitmapInfo: premultipliedFirst | byteOrder32Little)` 正好对上。
+
+两个坑：
+- `input.isReadyForMoreMediaData` 要自旋等，不能硬塞，否则 append 静默失败。
+- `finishWriting` 的回调要靠 runloop 驱动。后台线程里用
+  `while sem.wait(timeout: .now() + 0.01) == .timedOut { RunLoop.current.run(...) }`
+  同时等和泵，否则会一直挂着。
+
+### 自检
+
+`./.build/release/AKeyStats --video /tmp/x.mp4 2026-10-30 [秒数]`，
+渲完用 `AVAssetImageGenerator` 抽 5 帧 PNG（10% / 35% / 62% / 85% / 99%）落到 /tmp 对版式。
+
+本机 2026-10-30：47581 点 → 360 帧 / 12 秒 / 3.7MB，渲染 7 秒。
+
+## v0.4.1 回放视频里多指没分开
+
+复刻 `TrackpadHeatView` 时漏了一件事：App 里画轨迹是**先把点按 finger id 分组**
+（`groups[p.id]` 各成一条折线），视频的 `advance()` 却把所有手指的线段塞进了同一条
+`CGMutablePath`。当时以为用 `lastPoint` / `lastTime` 两张字典按 id 记状态就够了，其实不够。
+
+**为什么不够**
+`path.addLine(to:)` 是从**路径的当前点**连过去，不是从你记的 lastPoint 连过去。
+双指滚动时两根手指逐帧交替采样（f1,f2,f1,f2…），每根手指各自「连续」，
+但路径当前点永远是另一根手指的落点。于是 f1 的线被接到 f2 的位置，画出一条横穿板面的直线。
+
+本来 `opened` 这个 Set 想在「本批第一次见到该 finger」时 move 一次，之后不再 move —— 恰好把
+断开的机会也用掉了，等于保证了跨指一定连上。
+
+**数据**
+2026-10-30 的 pad.bin：47581 点 / 11 个 finger id。
+· 同 finger 相邻采样点位移：中位 0.0047，p99 0.0312（板宽比例）
+· 换 finger 那一步的位移：中位 0.1581，93.1% 超过 0.1
+旧算法一共连出 9506 条这类线，长度从 10% 到 90% 板宽不等。
+视觉结果就是中间糊成一坨实心橙、外面一圈近乎平行的长斜线——比真实轨迹还显眼。
+
+**改法**
+每批新增的点按 finger 分桶，各建一条 `CGMutablePath`，分别描进两张累积位图：
+
+```swift
+var batch: [UInt16: CGMutablePath] = [:]
+let continues = lastTime[p.id].map { p.t - $0 <= 0.25 } ?? false
+if continues, let last = lastPoint[p.id] {
+    let path = batch[p.id] ?? CGMutablePath()
+    if path.isEmpty { path.move(to: last) }   // 跨批接续：从上一批这根手指的落点起
+    path.addLine(to: pt)
+    batch[p.id] = path
+}
+// continues == false 是抬手指后的新起点：单点不产生笔画，交给下一个点去接
+```
+
+断点这里不用再 `move(to: pt)`：单独的 move 不出笔画，而下一个点会拿 `lastPoint` 当起点 move 过去，
+效果和「断点后重新起笔」一致。跨批接续也天然成立，因为 `lastPoint` 是按 id 存的。
+
+**顺带**
+每帧 `wideLayer.makeImage()` + `thinLayer.makeImage()` 各拷一张全尺寸位图，而少数帧并没有新增点。
+加了个 `imagesDirty` 标志，`drawn` 没变就直接复用上一张。
+
+自检：把同一段 800 点多指窗口分别按新旧算法画成 PNG 对比，旧版 773 段里 608 段是跨指线，
+新版 0 段。

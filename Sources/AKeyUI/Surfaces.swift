@@ -14,13 +14,9 @@ struct TrackpadHeatView: View {
     var showTrail = false
     var aspect: CGFloat = 1.39        // 妙控板 16.0 × 11.5 cm
 
-    /// 95 分位归一化：单个疯掉的格子不会把整张图压平
-    private var peak: Double {
-        let values = grid.cells.filter { $0 > 0 }.map(Double.init).sorted()
-        guard !values.isEmpty else { return 1 }
-        let index = min(values.count - 1, Int(Double(values.count) * 0.95))
-        return max(values[index], 1)
-    }
+    /// 95 分位归一化：单个疯掉的格子不会把整张图压平。
+    /// 口径统一在 HeatScaleInfo 里，图例和色块才不会对不上。
+    private var peak: Double { HeatScaleInfo.forGrid(grid).peak }
 
     var body: some View {
         GeometryReader { geo in
@@ -135,12 +131,7 @@ struct MouseHeatView: View {
     var rightClicks: Int
     var showLabels = true
 
-    private var peak: Double {
-        let values = grid.cells.filter { $0 > 0 }.map(Double.init).sorted()
-        guard !values.isEmpty else { return 1 }
-        let index = min(values.count - 1, Int(Double(values.count) * 0.95))
-        return max(values[index], 1)
-    }
+    private var peak: Double { HeatScaleInfo.forGrid(grid).peak }
 
     var body: some View {
         GeometryReader { geo in

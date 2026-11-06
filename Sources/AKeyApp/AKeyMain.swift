@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import AVFoundation
 import AKeyKit
 import AKeyUI
 import AKitStatusKit
@@ -35,6 +36,22 @@ struct AKeyStatsMain {
         if let index = args.firstIndex(of: "--keylog") {
             let seconds = Double(args[safe: index + 1] ?? "20") ?? 20
             KeyLog.run(seconds: seconds)
+            return
+        }
+
+        // 开发用：不开窗，直接把全部触控板轨迹导成 CSV（验证流式解码 / 格式）
+        if let index = args.firstIndex(of: "--export-traj") {
+            let path = args[safe: index + 1] ?? "/tmp/aks-trajectory.csv"
+            TrajectoryCLI.run(to: path)
+            return
+        }
+
+        // 开发用：直接渲一条轨迹视频，顺带抽几帧 PNG 对版式
+        if let index = args.firstIndex(of: "--video") {
+            let path = args[safe: index + 1] ?? "/tmp/aks-trajectory.mp4"
+            let day = args[safe: index + 2]
+            let seconds = args[safe: index + 3].flatMap(Double.init)
+            VideoCLI.run(to: path, day: day, seconds: seconds)
             return
         }
 
@@ -320,13 +337,21 @@ enum Snapshot {
         }
 
         let isPanel = pageName == "panel"
+        let isSheet = pageName == "videosheet"
         let shotHeight = CGFloat(Double(ProcessInfo.processInfo.environment["AKS_H"] ?? "") ?? 800)
         let shotWidth: CGFloat = 1140
-        let root: AnyView = isPanel
-            ? AnyView(PanelView(onOpen: {}, onQuit: {}).environmentObject(state).frame(width: 346))
-            : AnyView(RootView().environmentObject(state).frame(width: shotWidth, height: shotHeight))
+        let root: AnyView
+        if isPanel {
+            root = AnyView(PanelView(onOpen: {}, onQuit: {}).environmentObject(state).frame(width: 346))
+        } else if isSheet {
+            root = AnyView(TrajectoryVideoSheetPreview().environmentObject(state))
+        } else {
+            root = AnyView(RootView().environmentObject(state).frame(width: shotWidth, height: shotHeight))
+        }
         let host = NSHostingView(rootView: root)
-        host.frame = NSRect(x: 0, y: 0, width: isPanel ? 346 : shotWidth, height: isPanel ? 360 : shotHeight)
+        host.frame = NSRect(x: 0, y: 0,
+                            width: isPanel ? 346 : (isSheet ? 476 : shotWidth),
+                            height: isPanel ? 360 : (isSheet ? 400 : shotHeight))
         host.layoutSubtreeIfNeeded()
 
         // 等引擎第一轮采样（也等触控板设备枚举）
@@ -399,6 +424,105 @@ extension Array {
 //
 // 同一次按键，左边是 HID 原始 usage + 映射表算出的虚拟键码，右边是系统通过
 // NSEvent 给出的真实虚拟键码。两个一致才说明采集和界面画的是同一个键。
+
+@MainActor
+enum TrajectoryCLI {
+    static func run(to path: String) {
+        let today = DayKey.of(Date())
+        let days = TrajectoryExport.dates(for: .all, today: today)
+        print("▶️  轨迹导出：\(days.count) 天 → \(path)")
+        do {
+            let outcome = try TrajectoryExport.writeCSV(days: days, kind: .pad,
+                                                        to: URL(fileURLWithPath: path))
+            print("✅ \(outcome.points) 点 · \(outcome.days) 天 · \(outcome.bytes) 字节")
+        } catch {
+            print("❌ \(error.localizedDescription)")
+            exit(3)
+        }
+    }
+}
+
+private final class ResultBox: @unchecked Sendable {
+    var result: Result<TrajectoryVideo.Outcome, Error>?
+    let semaphore = DispatchSemaphore(value: 0)
+}
+
+private final class StepBox: @unchecked Sendable {
+    var value = -1
+}
+
+/// 开发用：渲一条轨迹回放视频，再抽几帧 PNG 出来对版式
+enum VideoCLI {
+    static func run(to path: String, day: String?, seconds: Double?) {
+        let target = day ?? DayKey.of(Date())
+        var config = TrajectoryVideo.Config()
+        config.duration = seconds
+        config.dark = ProcessInfo.processInfo.environment["AKS_DARK"] == "1"
+
+        let url = URL(fileURLWithPath: path)
+        let length = seconds.map { String(format: "%.1f 秒", $0) } ?? "自动"
+        print("▶️  轨迹回放：\(target) → \(path)  \(config.width)×\(config.height) @\(config.fps)fps  \(length)")
+
+        let started = Date()
+        let box = ResultBox()
+        let step = StepBox()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let outcome = try TrajectoryVideo.render(day: target, to: url, config: config) { progress in
+                    let value = Int(progress * 10)
+                    if value != step.value {
+                        step.value = value
+                        print("   \(value * 10)%")
+                    }
+                }
+                box.result = .success(outcome)
+            } catch {
+                box.result = .failure(error)
+            }
+            box.semaphore.signal()
+        }
+        box.semaphore.wait()
+
+        switch box.result {
+        case .success(let outcome):
+            let cost = Date().timeIntervalSince(started)
+            let duration = String(format: "%.2f", outcome.seconds)
+                + (outcome.automaticDuration ? "（跟 App 回放一致）" : "")
+            print("✅ \(outcome.frames) 帧 · \(duration) 秒 · \(outcome.points) 点 · \(outcome.bytes / 1024) KB")
+            print("   行程 \(TrajectoryVideo.meters(outcome.travelCM)) · 渲染耗时 \(String(format: "%.1f", cost)) 秒")
+            extractStills(from: url)
+        case .failure(let error):
+            print("❌ \(error.localizedDescription)")
+            exit(3)
+        case .none:
+            print("❌ 没有结果")
+            exit(3)
+        }
+    }
+
+    /// 用 AVAssetImageGenerator 从成片里抽帧，确认编码后的实际画面
+    private static func extractStills(from url: URL) {
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let total = asset.duration.seconds
+        guard total > 0 else { return }
+
+        let marks: [Double] = [0.10, 0.35, 0.62, 0.85, 0.99]
+        for mark in marks {
+            let time = CMTime(seconds: total * mark, preferredTimescale: 600)
+            guard let image = try? generator.copyCGImage(at: time, actualTime: nil) else { continue }
+            let rep = NSBitmapImageRep(cgImage: image)
+            guard let data = rep.representation(using: .png, properties: [:]) else { continue }
+            let out = "/tmp/aks-video-\(Int(mark * 100)).png"
+            try? data.write(to: URL(fileURLWithPath: out))
+            print("   🖼  \(out)")
+        }
+    }
+}
 
 @MainActor
 enum KeyLog {

@@ -83,6 +83,17 @@ public final class Store {
         return total
     }
 
+    /// 有哪些天真的存了轨迹文件（按日期升序）
+    public func trajectoryDays(kind: TrajKind) -> [String] {
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: trajDir.path)) ?? []
+        let suffix = ".\(kind.rawValue).bin"
+        return files
+            .filter { $0.hasSuffix(suffix) }
+            .map { String($0.dropLast(suffix.count)) }
+            .filter { $0.count == 10 }
+            .sorted()
+    }
+
     // MARK: 维护
 
     /// 早期版本把 HID usage 直接当成虚拟键码存了，这里一次性把历史数据换算过来。

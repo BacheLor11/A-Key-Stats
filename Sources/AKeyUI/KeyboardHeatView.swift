@@ -82,29 +82,6 @@ struct KeyboardHeatView: View {
     }
 }
 
-/// 热力色阶图例
-struct HeatLegend: View {
-    @Environment(\.aks) private var theme
-    var low = "少"
-    var high = "多"
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Text(low)
-                .font(AKSFont.sans(10))
-                .foregroundColor(theme.inkSoft)
-            LinearGradient(colors: [theme.heat(0), theme.heat(0.35), theme.heat(0.7), theme.heat(1)],
-                           startPoint: .leading, endPoint: .trailing)
-                .frame(width: 88, height: 6)
-                .clipShape(Capsule())
-                .overlay(Capsule().stroke(theme.border, lineWidth: 0.5))
-            Text(high)
-                .font(AKSFont.sans(10))
-                .foregroundColor(theme.inkSoft)
-        }
-    }
-}
-
 /// 排行榜：某键 · 次数 · 占比条
 struct KeyRankList: View {
     @Environment(\.aks) private var theme
