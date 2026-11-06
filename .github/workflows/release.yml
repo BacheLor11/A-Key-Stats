@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（不带 v，如 0.3.2）"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 确认版本
+        run: |
+          VERSION="${{ github.event.inputs.version || github.ref_name }}"
+          echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+
+      # Release 正文优先取 CHANGELOG.md 里对应版本那一段（人写的，分「新增 / 变更 / 修复」）；
+      # 没有才退回 git log。
+      - name: 生成更新说明
+        run: |
+          mkdir -p build
+          PREV=$(git describe --tags --abbrev=0 "v${VERSION}^" 2>/dev/null || true)
+          export PREV
+          python3 - "$VERSION" > build/RELEASE_NOTES.md <<'PY'
+          import re, subprocess, sys, pathlib, os
+
+          version = sys.argv[1]
+          out = [f"## A-Key-Stats {version}", ""]
+
+          section = ""
+          p = pathlib.Path("CHANGELOG.md")
+          if p.exists():
+              text = p.read_text(encoding="utf-8")
+              m = re.search(rf"^##\s*\[?{re.escape(version)}\]?[^\n]*\n(.*?)(?=^##\s|\Z)",
+                            text, re.S | re.M)
+              if m:
+                  section = re.sub(r"\n-{3,}\s*$", "", m.group(1).strip()).strip()
+
+          if section:
+              out.append(section)
+          else:
+              prev = os.environ.get("PREV", "")
+              rng = f"{prev}..HEAD" if prev else "HEAD"
+              log = subprocess.run(["git", "log", "--no-merges", "--reverse",
+                                    "--pretty=format:- %s", rng],
+                                   capture_output=True, text=True).stdout
+              out.append("_CHANGELOG.md 里还没有这一版，以下为提交记录：_")
+              out.append("")
+              out.append(log)
+
+          prev = os.environ.get("PREV", "")
+          if prev:
+              repo = os.environ.get("GITHUB_REPOSITORY", "")
+              out += ["", f"**完整对比**：https://github.com/{repo}/compare/{prev}...v{version}"]
+
+          print("\n".join(out))
+          PY
+          cat build/RELEASE_NOTES.md
+
+      # runner 上没有开发者证书，build.sh 会自动退回 ad-hoc 签名。
+      # 这意味着用户首次打开会被 Gatekeeper 拦一次（右键 → 打开），
+      # README 里已经写了这条。
+      - name: 打包
+        run: |
+          bash Scripts/build.sh --release
+          ls -l build/
+          ZIP="build/A-Key-Stats-${{ env.VERSION }}.zip"
+          test -f "$ZIP"
+          unzip -l "$ZIP" | head -12
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: A-Key-Stats ${{ env.VERSION }}
+          body_path: build/RELEASE_NOTES.md
+          generate_release_notes: false
+          files: ${{ env.ZIP }}

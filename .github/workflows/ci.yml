@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境
+        run: swift --version
+
+      - name: 编译
+        run: swift build --disable-sandbox
+
+      # 干净 runner 里没有 build/，顺便验证打包脚本自己能建目录
+      - name: 打包冒烟
+        run: |
+          bash Scripts/build.sh
+          test -x "build/A-Key-Stats.app/Contents/MacOS/AKeyStats"
+          test -f "build/A-Key-Stats.app/Contents/Info.plist"
+          test -f "build/A-Key-Stats.app/Contents/PlugIns/AKeyStats.akitplugin/Contents/MacOS/AKeyStats"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "build/A-Key-Stats.app/Contents/Info.plist"

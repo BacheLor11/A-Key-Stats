@@ -6,9 +6,11 @@
   "bundleId": "com.aibao.AKeyStats",
   "category": "tool",
   "minOS": "13.0",
+  "repo": "BacheLor11/A-Key-Stats",
   "asset": "A-Key-Stats-*.zip",
   "statusBar": {
     "supported": true
   },
+  "icon": "https://raw.githubusercontent.com/BacheLor11/A-Key-Stats/main/Resources/icon.png",
   "article": "https://askb.app"
 }
