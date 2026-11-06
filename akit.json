@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "a-key-stats",
+  "name": "A-Key-Stats",
+  "tagline": "按键与妙控板热力图：每天敲了哪些键、手指在板子上磨出什么形状。",
+  "bundleId": "com.aibao.AKeyStats",
+  "category": "tool",
+  "minOS": "13.0",
+  "asset": "A-Key-Stats-*.zip",
+  "statusBar": {
+    "supported": true
+  },
+  "article": "https://askb.app"
+}
