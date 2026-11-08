@@ -292,9 +292,11 @@ struct SettingsView: View {
     }
 
     private var permissionText: String {
+        let host = state.keyHealth.signing
+        let target = host.isPluginForm ? host.targetName : "A-Key-Stats"
         switch state.inputAccess {
         case .granted: return "已授权，键盘计数正常"
-        case .denied: return "被拒绝 —— 键盘计数拿不到数据"
+        case .denied: return "被拒绝 —— 键盘计数拿不到数据（要授权给 \(target)）"
         case .unknown: return "还没授权"
         }
     }
@@ -309,6 +311,7 @@ struct SettingsView: View {
 
     private var signingText: String {
         let info = state.keyHealth.signing
+        if info.isPluginForm { return "插件形态 · 宿主 \(info.targetName)" }
         var text = info.identity
         if info.translocated { text += " · 临时目录" }
         if !info.otherCopies.isEmpty { text += " · 另有副本" }

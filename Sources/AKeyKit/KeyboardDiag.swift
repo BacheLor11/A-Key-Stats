@@ -25,6 +25,23 @@ public struct SigningInfo: Sendable, Equatable {
     /// 签名稳定 = 重装/重编之后授权还能用
     public var isStable: Bool { !isAdhoc && !translocated }
 
+    /// 跑在 A-Kit 里（插件形态）：此时 TCC 认的是宿主，不是 A-Key-Stats。
+    /// 直接跑可执行文件（自检 / 快照）时没有 bundle id，按独立运行算，别误报成插件。
+    public var isPluginForm: Bool {
+        bundleID != "—" && bundleID != SigningInfo.standaloneID
+    }
+
+    /// 宿主名。独立运行时就是 A-Key-Stats
+    public var targetName: String {
+        guard isPluginForm else { return "A-Key-Stats" }
+        let name = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? bundleID
+        return name
+    }
+
+    public static let standaloneID = "com.aibao.AKeyStats"
+
     public var pathNote: String {
         var note = bundlePath
         if translocated { note += "（App Translocation）" }
@@ -97,7 +114,7 @@ public enum SigningVerdict {
             return "正在从系统临时目录（App Translocation）运行。把 app 拖到「应用程序」文件夹再打开，否则每次授权都对不上。"
         }
         if !info.otherCopies.isEmpty {
-            return "机器上还有另一份：\(info.otherCopies.joined(separator: "、"))。列表里那一项可能是它的授权。"
+            return "机器上还有另一份 A-Key-Stats（\(info.otherCopies.joined(separator: "、"))），列表里那项可能是它的授权。"
         }
         if info.isAdhoc {
             return "这份是 ad-hoc 签名：每次重新编译，系统那边就当成一个新 app，旧授权作废。"

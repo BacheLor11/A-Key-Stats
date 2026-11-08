@@ -100,7 +100,7 @@ struct KeyHealthBanner: View {
 
         case .noAccess:
             return Model(
-                title: "键盘没有记上：输入监控没给到 A-Key-Stats",
+                title: "键盘没有记上：\(health.signing.targetName) 没有输入监控授权",
                 detail: noAccessDetail(health),
                 symbol: "exclamationmark.triangle",
                 tint: theme.accent2,
@@ -128,11 +128,16 @@ struct KeyHealthBanner: View {
     }
 
     private func noAccessDetail(_ health: KeyboardHealth) -> String {
-        var text = "系统认为没有「输入监控」授权，键盘事件一条都读不到。触控板和鼠标不吃这个权限，所以它们还在照常记。"
+        let target = health.signing.targetName
+        var text = ""
+        if health.signing.isPluginForm {
+            text += "你现在是在 \(target) 里用这块工具：键盘采集跑在 \(target) 的进程里，所以「输入监控」必须授权给 \(target)，给 A-Key-Stats 自己授权不算。"
+        }
+        text += "系统认为没有「输入监控」授权，键盘事件一条都读不到。触控板和鼠标不吃这个权限，所以它们还在照常记。"
         if health.looksLikeStaleRecord {
-            text += "注意：这次还能枚举到键盘（\(health.keyboards.joined(separator: "、"))），说明设备看得见、事件不给 —— 多半是系统设置里那条授权已经和当前这份 app 对不上了（换机器拷贝、重新编译、或存在两份副本）。点「重置授权」清掉旧记录，重启后再授权一次即可。"
+            text += "这次还能枚举到键盘（\(health.keyboards.joined(separator: "、"))），说明设备看得见、事件不给 —— 那条授权已经和当前这份 \(target) 对不上（重新编译、换机器、两份副本都会这样）。点「重置授权」清掉旧记录，重启后再授权一次即可。"
         } else {
-            text += "去「隐私与安全性 → 输入监控」把 A-Key-Stats 打开；如果开关本来就是开的，点「重置授权」把旧记录清掉再授权一次。"
+            text += "去「隐私与安全性 → 输入监控」把 \(target) 打开；开关本来就是开的，就点「重置授权」清掉旧记录再授权一次。"
         }
         if let note = SigningVerdict.note(health.signing) { text += " " + note }
         return text
@@ -158,10 +163,11 @@ struct KeyHealthBanner: View {
     }
 
     private func resetPermission() {
+        let target = state.keyHealth.signing.targetName
         if state.resetKeyboardPermission() {
-            resetNote = "已清掉旧的授权记录。请重启 A-Key-Stats（点右边「重启 app」），重启后系统会重新问一次「输入监控」，点允许即可。"
+            resetNote = "已清掉 \(target) 的旧授权记录。请重启（点右边「重启 app」），重启后打开 A-Key-Stats，系统会重新问一次「输入监控」，点允许即可。之后只要 \(target) 的签名不再变，就不用再做这一步。"
         } else {
-            resetNote = "没能清除授权记录（可能要输入管理员密码，被取消了）。可以手动来：系统设置 → 隐私与安全性 → 输入监控，选中 A-Key-Stats 按「−」删掉，再重启 app。"
+            resetNote = "没能清除授权记录（可能要输入管理员密码，被取消了）。可以手动来：系统设置 → 隐私与安全性 → 输入监控，选中 \(target) 按「−」删掉，再重启。"
         }
     }
 
@@ -173,6 +179,7 @@ struct KeyHealthBanner: View {
         let copies = signing.otherCopies.isEmpty ? "无" : signing.otherCopies.joined(separator: "、")
         let text = """
         A-Key-Stats \(AKSBundle.version) 键盘诊断
+        形态: \(signing.isPluginForm ? "A-Kit 插件（采集在 \(signing.targetName) 进程里）" : "独立运行")
         状态: \(health.state.rawValue)
         输入监控: \(health.access)（IOHID open: \(health.managerOpen ? "成功" : "失败") · 事件层权限: \(KeyTap.canListen() ? "有" : "无")）
         可见键盘: \(health.keyboards.isEmpty ? "（空）" : health.keyboards.joined(separator: "、"))
