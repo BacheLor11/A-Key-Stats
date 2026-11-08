@@ -16,9 +16,12 @@ public struct RootView: View {
             Rectangle()
                 .fill(AKSScheme.of(scheme).border)
                 .frame(width: 1)
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(AKSScheme.of(scheme).bg)
+            VStack(spacing: 0) {
+                KeyHealthBanner()
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .background(AKSScheme.of(scheme).bg)
         }
         .environment(\.aks, AKSScheme.of(scheme))
         .background(AKSScheme.of(scheme).bg)

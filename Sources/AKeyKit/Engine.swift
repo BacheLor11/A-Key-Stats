@@ -22,6 +22,45 @@ public struct LiveInputEvent {
     }
 }
 
+/// 键盘采集的体检结果。
+///
+/// 触控板走 MultitouchSupport、鼠标只要设备枚举，两样都不吃「输入监控」权限；
+/// 键盘是唯一会被系统悄悄藏起来的那一路，所以必须能单独告诉用户「现在为什么没字」。
+public struct KeyboardHealth {
+    public enum State: String, Sendable {
+        /// 输入监控没授权
+        case noAccess
+        /// 授权了，但系统里看不到任何键盘设备，事件层兜底也没收到键
+        case hidden
+        /// 看不到键盘设备，但事件层能收到 —— 已在兜底记录（远程/KVM/通用控制常见）
+        case tapOnly
+        /// 正常
+        case ok
+
+        public var needsAttention: Bool { self != .ok }
+    }
+
+    public var state: State
+    public var access: InputTap.Access
+    public var keyboards: [String]
+    public var hidEvents: Int
+    public var tapEvents: Int
+    public var lastKeyAt: Date?
+
+    public init(state: State, access: InputTap.Access, keyboards: [String],
+                hidEvents: Int, tapEvents: Int, lastKeyAt: Date?) {
+        self.state = state
+        self.access = access
+        self.keyboards = keyboards
+        self.hidEvents = hidEvents
+        self.tapEvents = tapEvents
+        self.lastKeyAt = lastKeyAt
+    }
+
+    public static let unknown = KeyboardHealth(state: .ok, access: .unknown, keyboards: [],
+                                              hidEvents: 0, tapEvents: 0, lastKeyAt: nil)
+}
+
 /// 采集引擎：把键、鼠标、触控板三路事件汇总进「今天」这一份 DayStats，
 /// 顺带把触控板原始轨迹降采样落盘（可回放）。
 public final class Engine {
@@ -34,6 +73,10 @@ public final class Engine {
     public private(set) var isRunning = false
     public private(set) var isPaused = false
     public private(set) var trajectoryVersion = 0
+    /// 最近一次真的记到按键的时间（键盘有没有在工作，看这个最快）
+    public private(set) var lastKeyAt: Date?
+    /// 事件层兜底是否在跑（看不到键盘 HID 设备时才会启用）
+    public private(set) var isKeyTapActive = false
 
     public var onUpdate: (() -> Void)?
     public var onLiveEvent: ((LiveInputEvent) -> Void)?
@@ -44,6 +87,7 @@ public final class Engine {
 
     private let store = Store.shared
     private let input = InputTap()
+    private let keyTap = KeyTap()
     private let pad = PadTap()
     private let lock = NSLock()
 
@@ -55,6 +99,7 @@ public final class Engine {
     private var lastPadContactAt: Date?
     private var lastMouseContactAt: Date?
     private var timers: [Timer] = []
+    private var ticksSinceDeviceScan = 0
     private var scrollMonitor: Any?
     private var localScrollMonitor: Any?
     /// 当前滚动手势是不是触控板发起的（nil = 还没判定）
@@ -103,6 +148,18 @@ public final class Engine {
         }
         _ = input.start()
 
+        // 兜底链路：系统里看不到键盘设备时，靠事件层把按键接住
+        keyTap.onKeyDown = { [weak self] code in
+            guard let self, self.input.keyboardNames.isEmpty else { return }
+            self.onLiveEvent?(LiveInputEvent(kind: .keyDown, code: code, device: KeyTap.deviceName))
+            self.recordKey(code)
+        }
+        keyTap.onKeyUp = { [weak self] code in
+            guard let self, self.input.keyboardNames.isEmpty else { return }
+            self.onLiveEvent?(LiveInputEvent(kind: .keyUp, code: code, device: KeyTap.deviceName))
+        }
+        updateKeyTapFallback()
+
         pad.onFrame = { [weak self] info, contacts in
             self?.recordContacts(info: info, contacts: contacts)
         }
@@ -125,6 +182,8 @@ public final class Engine {
 
     public func stop() {
         input.stop()
+        keyTap.stop()
+        isKeyTapActive = false
         pad.stop()
         for timer in timers { timer.invalidate() }
         timers.removeAll()
@@ -155,6 +214,7 @@ public final class Engine {
 
     private func recordKey(_ code: UInt16) {
         guard !isPaused else { return }
+        lastKeyAt = Date()
         lock.lock()
         rolloverIfNeeded()
         today.keys[String(code), default: 0] += 1
@@ -290,7 +350,26 @@ public final class Engine {
     private func tick() {
         // 权限可能在用户去系统设置里改过
         inputAccess = InputTap.access()
+        // 设备也会变：键盘刚连上 / 刚被授权时，设备要到下一次枚举才看得到。
+        // 每 5 秒重扫一次，用户不用重启 app。
+        ticksSinceDeviceScan += 1
+        if ticksSinceDeviceScan >= 5 {
+            ticksSinceDeviceScan = 0
+            input.refreshDevices()
+            updateKeyTapFallback()
+        }
         onUpdate?()
+    }
+
+    /// 只在「系统里看不到键盘 HID 设备」时挂上事件层监听，
+    /// 键盘一露头就立刻摘掉 —— 两条链路同时开着会把同一次按下记两遍。
+    private func updateKeyTapFallback() {
+        if input.keyboardNames.isEmpty {
+            if !keyTap.isRunning, inputAccess == .granted { keyTap.start() }
+        } else if keyTap.isRunning {
+            keyTap.stop()
+        }
+        isKeyTapActive = keyTap.isRunning
     }
 
     // MARK: 读
@@ -331,9 +410,40 @@ public final class Engine {
 
     public func requestInputAccess() {
         InputTap.requestAccess()
+        KeyTap.requestListen()
         input.refreshDevices()
         inputAccess = InputTap.access()
+        updateKeyTapFallback()
         onUpdate?()
+    }
+
+    /// 用户点「重新检测」：重扫设备 + 重读权限 + 重挂兜底链路
+    public func recheckKeyboard() {
+        input.refreshDevices()
+        inputAccess = InputTap.access()
+        updateKeyTapFallback()
+        onUpdate?()
+    }
+
+    /// 键盘现在到底通不通 —— 设置页和顶部提示条都靠它说话
+    public var keyboardHealth: KeyboardHealth {
+        let names = input.keyboardNames
+        let state: KeyboardHealth.State
+        if inputAccess != .granted {
+            state = .noAccess
+        } else if !names.isEmpty {
+            state = .ok
+        } else if keyTap.isRunning && keyTap.events > 0 {
+            state = .tapOnly
+        } else {
+            state = .hidden
+        }
+        return KeyboardHealth(state: state,
+                              access: inputAccess,
+                              keyboards: names,
+                              hidEvents: input.receivedEvents,
+                              tapEvents: keyTap.events,
+                              lastKeyAt: lastKeyAt)
     }
 
     public var storedDeviceNames: (keyboards: [String], mice: [String]) {

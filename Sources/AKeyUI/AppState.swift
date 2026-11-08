@@ -77,6 +77,8 @@ public final class AppState: ObservableObject {
     @Published public private(set) var recentDays: [DayStats] = []
     @Published public private(set) var padDevices: [MTDeviceInfo] = []
     @Published public private(set) var inputAccess: InputTap.Access = .unknown
+    /// 键盘采集的体检结果（顶部提示条 + 设置页诊断区）
+    @Published public private(set) var keyHealth: KeyboardHealth = .unknown
     @Published public private(set) var isPaused = false
     @Published public private(set) var storedDeviceNames: (keyboards: [String], mice: [String]) = ([], [])
     @Published public private(set) var trajectoryBytes = 0
@@ -206,6 +208,7 @@ public final class AppState: ObservableObject {
         recentDays = engine.recent(14)
         padDevices = engine.padDevices
         inputAccess = engine.inputAccess
+        keyHealth = engine.keyboardHealth
         isPaused = engine.isPaused
         storedDeviceNames = engine.storedDeviceNames
         trajectoryBytes = engine.trajectoryBytes()
@@ -308,6 +311,12 @@ public final class AppState: ObservableObject {
 
     public func requestPermission() {
         engine.requestInputAccess()
+        refresh()
+    }
+
+    /// 「重新检测」：用户在系统设置里改完权限回来，不用重启 app
+    public func recheckKeyboard() {
+        engine.recheckKeyboard()
         refresh()
     }
 

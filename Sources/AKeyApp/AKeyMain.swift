@@ -39,6 +39,19 @@ struct AKeyStatsMain {
             return
         }
 
+        // 开发用：给 --keytap 当发键用的子进程
+        if args.contains("--postkey") {
+            KeyTapCLI.postKey()
+            return
+        }
+
+        // 开发用：验证事件层兜底能收到按键（自己发一个 Control 按下，不打扰前台）
+        if let index = args.firstIndex(of: "--keytap") {
+            let seconds = Double(args[safe: index + 1] ?? "4") ?? 4
+            KeyTapCLI.run(seconds: seconds)
+            return
+        }
+
         // 开发用：不开窗，直接把全部触控板轨迹导成 CSV（验证流式解码 / 格式）
         if let index = args.firstIndex(of: "--export-traj") {
             let path = args[safe: index + 1] ?? "/tmp/aks-trajectory.csv"
@@ -420,6 +433,62 @@ extension Array {
     subscript(safe index: Int) -> Element? { index >= 0 && index < count ? self[index] : nil }
 }
 
+// MARK: - 事件层兜底自检
+//
+// 键盘被系统藏起来（或按键根本不是本机键盘发的）时，只有 CGEventTap 能看见。
+// 这里自己发一个 Control 按下/抬起，验证回调真的会被调用、键码取得对，
+// 不往输入焦点里塞可见字符。
+
+@MainActor
+enum KeyTapCLI {
+    static func run(seconds: Double) {
+        _ = NSApplication.shared
+        let tap = KeyTap()
+        var downs: [UInt16] = []
+        var ups: [UInt16] = []
+        tap.onKeyDown = { downs.append($0) }
+        tap.onKeyUp = { ups.append($0) }
+
+        guard tap.start() else {
+            print("❌ 事件层监听挂不上（输入监控没给到本进程）")
+            exit(3)
+        }
+        print("▶️  事件层监听已启动 ✓  监听 \(Int(seconds)) 秒")
+        print("   监听权限 \(CGPreflightListenEventAccess() ? "✓" : "✗") · 辅助功能 \(AXIsProcessTrusted() ? "✓" : "✗")")
+
+        // 同一个进程往事件层塞的键，系统不会再回灌给它自己的 tap，
+        // 所以必须另起一个进程去发 —— 这样才是真的「别人按的键我方能不能听见」
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        child.arguments = ["--postkey"]
+        try? child.run()
+        print("   已派生 #\(child.processIdentifier) 在 1 秒后发一个 Control 按下/抬起（不出字符）")
+
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+        }
+        tap.stop()
+        print(String(format: "down %d 条 · up %d 条 · 键码 %@", downs.count, ups.count,
+                     downs.isEmpty ? "—" : downs.map { String(format: "0x%02X", $0) }.joined(separator: ",")))
+        if downs.isEmpty {
+            print("   （0 条不一定代表监听坏了：发键那一步在沙箱/无辅助功能的进程里会被静默拦掉，")
+            print("     真正的判据是真键盘敲一下 —— app 里看顶部提示条是「已兜底」还是「看不到键盘」）")
+        }
+        exit(downs.isEmpty ? 6 : 0)
+    }
+
+    /// 子进程：发一个 Control 按下/抬起就走
+    static func postKey() {
+        Thread.sleep(forTimeInterval: 1.0)
+        let source = CGEventSource(stateID: .hidSystemState)
+        let key: CGKeyCode = 0x3B          // kVK_Control
+        CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true)?.post(tap: .cghidEventTap)
+        CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)?.post(tap: .cghidEventTap)
+        exit(0)
+    }
+}
+
 // MARK: - 键码对拍
 //
 // 同一次按键，左边是 HID 原始 usage + 映射表算出的虚拟键码，右边是系统通过
@@ -603,6 +672,15 @@ enum SelfTest {
         tap.refreshDevices()
         print("键盘设备 : \(tap.keyboardNames.isEmpty ? "（空，多半是没授权）" : tap.keyboardNames.joined(separator: "、"))")
         print("鼠标设备 : \(tap.mouseNames.isEmpty ? "（空）" : tap.mouseNames.joined(separator: "、"))")
+
+        // 键盘设备为空时，事件层兜底能不能挂上，决定了还有没有救
+        let keyTap = KeyTap()
+        if keyTap.start() {
+            print("事件层监听 : ✅ 可用（键盘被系统藏起来时靠它兜底）")
+            keyTap.stop()
+        } else {
+            print("事件层监听 : ❌ 不可用（输入监控没给到本进程）")
+        }
 
         let devices = PadTap.describeDevices()
         print("多点触控 : \(devices.isEmpty ? "（空）" : "")")

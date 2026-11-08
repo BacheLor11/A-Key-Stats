@@ -208,6 +208,22 @@ struct SettingsView: View {
                                    ? "未授权 / 未检测到"
                                    : state.storedDeviceNames.keyboards.joined(separator: "、"),
                                    mono: false)
+                        AKSStatRow(label: "事件层兜底",
+                                   value: state.keyHealth.state == .tapOnly ? "已接管" : "未启用",
+                                   mono: false)
+                        AKSStatRow(label: "最近一次按键",
+                                   value: lastKeyText,
+                                   mono: false)
+                        HStack {
+                            Button("重新检测") { state.recheckKeyboard() }
+                                .buttonStyle(AKSPrimaryButtonStyle(filled: false))
+                            Button("打开输入监控") { openPrivacySettings() }
+                                .buttonStyle(AKSPrimaryButtonStyle(filled: false))
+                            Spacer()
+                        }
+                        Text("触控板和鼠标不需要「输入监控」权限，所以权限丢了的时候只有键盘会安静地停摆。顶部提示条会告诉你现在卡在哪。")
+                            .font(AKSFont.sans(11))
+                            .foregroundColor(theme.inkSoft)
                         AKSStatRow(label: "数据目录", value: state.engine.dataDirectory.path, mono: false)
                     }
                 }
@@ -273,6 +289,14 @@ struct SettingsView: View {
         case .denied: return "被拒绝 —— 键盘计数拿不到数据"
         case .unknown: return "还没授权"
         }
+    }
+
+    private var lastKeyText: String {
+        guard let date = state.keyHealth.lastKeyAt else { return "本次运行还没记到过" }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     private func openPrivacySettings() {

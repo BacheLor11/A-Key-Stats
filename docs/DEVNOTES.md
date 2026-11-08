@@ -281,3 +281,41 @@ if continues, let last = lastPoint[p.id] {
 
 自检：把同一段 800 点多指窗口分别按新旧算法画成 PNG 对比，旧版 773 段里 608 段是跨指线，
 新版 0 段。
+
+---
+
+## 键盘为什么会「安静地」不记（0.4.2）
+
+**现象**
+触控板有数，键盘一条都没有，界面上没有任何提示，看起来像「坏了但不知道坏在哪」。
+
+**为什么只有键盘会中招**
+三路采集吃的是三种完全不同的权限：
+
+| 通道 | 依赖 | 是否需要「输入监控」 |
+| --- | --- | --- |
+| 触控板 | MultitouchSupport 私有框架 + MTDevice | 不需要 |
+| 鼠标 | IOHIDManager，但指向设备不受保护 | 不需要 |
+| 键盘 | IOHIDManager，usagePage 0x07 | **需要** |
+
+系统对未授权进程的处理是「把键盘设备藏起来」，不是「打开失败」——
+所以 `IOHIDManagerOpen` 返回 `kIOReturnSuccess`，`IOHIDManagerCopyDevices`
+里却一台键盘都没有，鼠标还在。代码里没有任何错误可捕获，只能靠主动体检。
+
+**两种会触发的情况**
+1. 授权失效：TCC 记录绑在签名身份上。重新安装 / 换签证书之后，系统设置里开关可能还亮着，
+   但事件已经不往这边送了 —— 关掉再打开一次才会重建记录。
+2. 按键不是本机键盘发的：KVM、远程桌面、通用控制都是把按键注入事件层，压根没有 HID 设备。
+   这类情况 IOHID 永远看不见，只有事件层能看见。
+
+**处理**
+`KeyboardHealth` 把状态分成 `noAccess` / `hidden` / `tapOnly` / `ok` 四态，界面据此说话。
+`hidden` 时挂一层 `CGEventTap`（`cghidEventTap`，`.listenOnly`）兜底计数；
+键盘设备一露头就立刻摘掉，避免同一次按下记两遍（两条链路是互斥的）。
+
+**踩坑**
+- `tapDisabledByTimeout`：系统嫌回调慢会自己把 tap 停掉，之后一条都收不到，必须在回调里重新 `tapEnable`。
+- 同一个进程往事件层塞的键，系统不会回灌给它自己的 tap。要验证监听链路，
+  得另起一个进程发键（`--postkey` 子进程），否则会误判成「监听坏了」。
+- `CGEvent(keyboardEventSource:virtualKey:keyDown:)` 发出去的就是虚拟键码，
+  和 IOHID 那条链路要先做 usage → kVK 换算不同，兜底这条路不用查表。
