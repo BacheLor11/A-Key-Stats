@@ -126,11 +126,33 @@
 **用固定证书签名很重要** —— 输入监控授权绑定签名身份，ad-hoc 签名每次重建都会掉授权。
 可用 `CODESIGN_ID=<sha1或名字>` 指定。
 
+### 键盘不记数时按这个顺序查
+
+1. **完全退出 app 再打开**（⌘Q，不是关窗口）。授权是进程启动时判定的，开关是在 app 运行中
+   才打开的话，必须换一个进程才生效。
+2. 看顶部提示条。写着「没给到 A-Key-Stats」就点 **重置授权**：它执行
+   `tccutil reset ListenEvent com.aibao.AKeyStats` 清掉旧记录，然后重启 app 重新授权。
+3. 还是不行就看设置页「采集 → 签名身份」那一行：
+   - `ad-hoc（无证书）` —— 每次重装/重编都要重新授权。在目标机器上装好开发者证书，
+     `./Scripts/build.sh --install` 会自动挑证书签名。
+   - `· 临时目录` —— 系统把 app 挪到 AppTranslocation 下跑了（从「下载」里直接双击启动），
+     拖进「应用程序」文件夹再打开。
+   - `· 另有副本` —— 机器上还有一份同名 app，列表里那条授权可能属于它。
+4. 一条命令拿到全部信息：
+
+   ```bash
+   ~/Applications/A-Key-Stats.app/Contents/MacOS/AKeyStats --keyperm 8
+   ```
+
+   打印签名身份、输入监控状态、可见键盘、监听 8 秒收到的按键数。
+
 ## 开发自检
 
 ```bash
 ./.build/release/AKeyStats --selftest                 # 权限 / 设备识别 / 数据目录
+./.build/release/AKeyStats --keyperm 8                # 签名身份 + 权限 + 设备 + 8 秒内的按键数
 AKS_DEMO=1 ./.build/release/AKeyStats --snapshot a.png dashboard   # 离屏渲染（假数据）
+AKS_DEMO=1 AKS_KEY=noaccess ./.build/release/AKeyStats --snapshot k.png dashboard  # 对键盘提示条版式
 ./.build/release/AKeyStats --snapshot b.png keyboard  # 离屏渲染（真实数据）
 AKS_LAYOUT=ansiFull ./.build/release/AKeyStats --snapshot c.png keyboard  # 指定配列
 AKS_DARK=1 ./.build/release/AKeyStats --snapshot d.png dashboard          # 深色

@@ -214,8 +214,11 @@ struct SettingsView: View {
                         AKSStatRow(label: "最近一次按键",
                                    value: lastKeyText,
                                    mono: false)
+                        AKSStatRow(label: "签名身份", value: signingText, mono: false)
                         HStack {
                             Button("重新检测") { state.recheckKeyboard() }
+                                .buttonStyle(AKSPrimaryButtonStyle(filled: false))
+                            Button("重置授权") { state.resetKeyboardPermission() }
                                 .buttonStyle(AKSPrimaryButtonStyle(filled: false))
                             Button("打开输入监控") { openPrivacySettings() }
                                 .buttonStyle(AKSPrimaryButtonStyle(filled: false))
@@ -224,6 +227,11 @@ struct SettingsView: View {
                         Text("触控板和鼠标不需要「输入监控」权限，所以权限丢了的时候只有键盘会安静地停摆。顶部提示条会告诉你现在卡在哪。")
                             .font(AKSFont.sans(11))
                             .foregroundColor(theme.inkSoft)
+                        if let note = SigningVerdict.note(state.keyHealth.signing) {
+                            Text(note)
+                                .font(AKSFont.sans(11))
+                                .foregroundColor(theme.accent2)
+                        }
                         AKSStatRow(label: "数据目录", value: state.engine.dataDirectory.path, mono: false)
                     }
                 }
@@ -297,6 +305,14 @@ struct SettingsView: View {
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.unitsStyle = .short
         return formatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    private var signingText: String {
+        let info = state.keyHealth.signing
+        var text = info.identity
+        if info.translocated { text += " · 临时目录" }
+        if !info.otherCopies.isEmpty { text += " · 另有副本" }
+        return text
     }
 
     private func openPrivacySettings() {

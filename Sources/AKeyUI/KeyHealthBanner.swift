@@ -12,6 +12,8 @@ struct KeyHealthBanner: View {
     @Environment(\.aks) private var theme
     @State private var dismissed = false
     @State private var copied = false
+    /// 重置授权之后换成这句，并把按钮换成「重启 app」
+    @State private var resetNote: String?
 
     private struct Model {
         var title: String
@@ -33,7 +35,7 @@ struct KeyHealthBanner: View {
                     Text(model.title)
                         .font(AKSFont.sans(12.5, weight: .medium))
                         .foregroundColor(theme.ink)
-                    Text(model.detail)
+                    Text(resetNote ?? model.detail)
                         .font(AKSFont.sans(11.5))
                         .foregroundColor(theme.inkSoft)
                         .fixedSize(horizontal: false, vertical: true)
@@ -44,12 +46,23 @@ struct KeyHealthBanner: View {
                 HStack(spacing: 7) {
                     Button(copied ? "已复制" : "复制诊断") { copyDiagnosis() }
                         .buttonStyle(AKSPrimaryButtonStyle(filled: false))
-                    Button("重新检测") { state.recheckKeyboard() }
-                        .buttonStyle(AKSPrimaryButtonStyle(filled: false))
-                    if state.keyHealth.state != .tapOnly {
-                        Button("打开输入监控") { openListenEventSettings() }
+
+                    if resetNote != nil {
+                        Button("重启 app") { state.relaunchApp() }
                             .buttonStyle(AKSPrimaryButtonStyle())
+                    } else {
+                        if state.keyHealth.state == .noAccess {
+                            Button("重置授权") { resetPermission() }
+                                .buttonStyle(AKSPrimaryButtonStyle(filled: false))
+                        }
+                        Button("重新检测") { state.recheckKeyboard() }
+                            .buttonStyle(AKSPrimaryButtonStyle(filled: false))
+                        if state.keyHealth.state != .tapOnly {
+                            Button("打开输入监控") { openListenEventSettings() }
+                                .buttonStyle(AKSPrimaryButtonStyle())
+                        }
                     }
+
                     if model.canDismiss {
                         Button {
                             dismissed = true
@@ -87,8 +100,8 @@ struct KeyHealthBanner: View {
 
         case .noAccess:
             return Model(
-                title: "键盘没有记上：输入监控没授权",
-                detail: "macOS 不允许 A-Key-Stats 读键盘事件。触控板和鼠标不吃这个权限，所以它们还在照常记。去「隐私与安全性 → 输入监控」把 A-Key-Stats 打开即可。",
+                title: "键盘没有记上：输入监控没给到 A-Key-Stats",
+                detail: noAccessDetail(health),
                 symbol: "exclamationmark.triangle",
                 tint: theme.accent2,
                 canDismiss: false
@@ -114,6 +127,17 @@ struct KeyHealthBanner: View {
         }
     }
 
+    private func noAccessDetail(_ health: KeyboardHealth) -> String {
+        var text = "系统认为没有「输入监控」授权，键盘事件一条都读不到。触控板和鼠标不吃这个权限，所以它们还在照常记。"
+        if health.looksLikeStaleRecord {
+            text += "注意：这次还能枚举到键盘（\(health.keyboards.joined(separator: "、"))），说明设备看得见、事件不给 —— 多半是系统设置里那条授权已经和当前这份 app 对不上了（换机器拷贝、重新编译、或存在两份副本）。点「重置授权」清掉旧记录，重启后再授权一次即可。"
+        } else {
+            text += "去「隐私与安全性 → 输入监控」把 A-Key-Stats 打开；如果开关本来就是开的，点「重置授权」把旧记录清掉再授权一次。"
+        }
+        if let note = SigningVerdict.note(health.signing) { text += " " + note }
+        return text
+    }
+
     private func hiddenDetail(_ health: KeyboardHealth) -> String {
         if let last = health.lastKeyAt {
             let formatter = RelativeDateTimeFormatter()
@@ -133,17 +157,31 @@ struct KeyHealthBanner: View {
         }
     }
 
+    private func resetPermission() {
+        if state.resetKeyboardPermission() {
+            resetNote = "已清掉旧的授权记录。请重启 A-Key-Stats（点右边「重启 app」），重启后系统会重新问一次「输入监控」，点允许即可。"
+        } else {
+            resetNote = "没能清除授权记录（可能要输入管理员密码，被取消了）。可以手动来：系统设置 → 隐私与安全性 → 输入监控，选中 A-Key-Stats 按「−」删掉，再重启 app。"
+        }
+    }
+
     /// 把体检结果拼成一段可粘贴的文字，出问题时直接发过来就能定位
     private func copyDiagnosis() {
         let health = state.keyHealth
         let last = health.lastKeyAt.map { ISO8601DateFormatter().string(from: $0) } ?? "—"
+        let signing = health.signing
+        let copies = signing.otherCopies.isEmpty ? "无" : signing.otherCopies.joined(separator: "、")
         let text = """
         A-Key-Stats \(AKSBundle.version) 键盘诊断
         状态: \(health.state.rawValue)
-        输入监控: \(health.access)
+        输入监控: \(health.access)（IOHID open: \(health.managerOpen ? "成功" : "失败") · 事件层权限: \(KeyTap.canListen() ? "有" : "无")）
         可见键盘: \(health.keyboards.isEmpty ? "（空）" : health.keyboards.joined(separator: "、"))
         HID 事件: \(health.hidEvents) · 事件层: \(health.tapEvents)
         最近按键: \(last)
+        应用路径: \(signing.pathNote)
+        签名: \(signing.identity)\(signing.teamID.map { " · Team \($0)" } ?? "")
+        BundleID: \(signing.bundleID)
+        其他副本: \(copies)
         系统: \(ProcessInfo.processInfo.operatingSystemVersionString)
         """
         let board = NSPasteboard.general

@@ -320,6 +320,31 @@ public final class AppState: ObservableObject {
         refresh()
     }
 
+    /// 清掉本 app 的「输入监控」授权记录（要管理员密码）。
+    ///
+    /// 用于「系统设置里开关明明是开的，系统却仍然不给键盘事件」——
+    /// 那条记录已经和正在运行的这份 app 对不上（换了机器、重新编译、存在两份副本都会这样）。
+    /// 只有把记录删掉、重启后再授权一次，系统才会按当前的签名重建。
+    @discardableResult
+    public func resetKeyboardPermission() -> Bool {
+        let id = Bundle.main.bundleIdentifier ?? AKSPrefs.suiteName
+        let source = "do shell script \"/usr/bin/tccutil reset ListenEvent \(id)\" with administrator privileges"
+        var error: NSDictionary?
+        let ok = NSAppleScript(source: source)?.executeAndReturnError(&error) != nil && error == nil
+        if ok { recheckKeyboard() }
+        return ok
+    }
+
+    /// 重置授权之后必须换一个进程，系统才会按新记录重新问一次
+    public func relaunchApp() {
+        let url = Bundle.main.bundleURL
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { NSApp.terminate(nil) }
+        }
+    }
+
     public func resetAll() {
         engine.resetAll()
         lastTrajectoryVersion = -1
@@ -510,6 +535,12 @@ public final class AppState: ObservableObject {
     }
 
     /// 开发用：造一批假数据，方便离屏渲染对版式（不动真实存储）
+    /// 仅供离屏渲染/自检：伪造键盘体检结果，用来对提示条和设置页的版式
+    public func injectKeyHealth(_ health: KeyboardHealth) {
+        keyHealth = health
+        frozen = true
+    }
+
     public func injectDemoData() {
         var day = today
         let hot: [(UInt16, Int)] = [(49, 5820), (36, 2410), (14, 1980), (1, 1620), (0, 1480),

@@ -319,3 +319,48 @@ if continues, let last = lastPoint[p.id] {
   得另起一个进程发键（`--postkey` 子进程），否则会误判成「监听坏了」。
 - `CGEvent(keyboardEventSource:virtualKey:keyDown:)` 发出去的就是虚拟键码，
   和 IOHID 那条链路要先做 usage → kVK 换算不同，兜底这条路不用查表。
+
+---
+
+## 「开关开着却没授权」是怎么回事（0.4.3）
+
+**现场**
+另一台 Mac（macOS 15.6.1）上的诊断：
+
+```
+状态: noAccess
+输入监控: denied
+可见键盘: Apple Internal Keyboard / Trackpad
+HID 事件: 0 · 事件层: 0
+```
+
+键盘设备**能枚举到**，事件**一条没有**，权限却报 denied。这三条同时出现，说明卡在授权记录，不是卡在设备。
+
+**为什么可见却收不到**
+`IOHIDManagerSetDeviceMatchingMultiple` + `IOHIDManagerCopyDevices` 只做匹配，不需要「输入监控」；
+真正需要授权的是 **打开设备读元素**（open 那一刻判定）。所以未授权时的表现是：
+设备列表里有这台键盘，`IOHIDManagerOpen` 也返回成功，回调却永远不来 —— 没有任何错误可 catch。
+
+**为什么不生效：授权记录绑在签名身份 + 路径上**
+- ad-hoc 签名：代码要求退化成 `cdhash H"..."`，**每次重新编译 cdhash 就变**，旧授权作废。
+  GitHub Release 里的包是 ad-hoc 的，所以「下载新的覆盖旧的」= 每次都要重授权。
+- 换机器拷贝：TCC 记录不会跟过去；如果目标机上原本就有一条同名记录（旧版本留下的），
+  开关会显示成开的，但那一条指向的是另一份 app。
+- App Translocation：从「下载」里直接双击，系统会在 `/private/var/folders/.../AppTranslocation/`
+  下随机路径跑它，授权对一个临时路径有效，退出就没了。
+
+**2026-11 这次的处理**
+1. `SigningInfo` 用 Security 框架（`SecStaticCodeCreateWithPath` + `SecCodeCopySigningInformation`）
+   读自己这份 bundle 的 `kSecCodeInfoFlags`，`& 0x0002` 就是 ad-hoc；顺带取 Team ID、证书摘要、
+   有没有落在 AppTranslocation、机器上还有没有别的副本。全程不 fork `codesign`。
+2. 「重置授权」= `osascript ... with administrator privileges` 跑
+   `tccutil reset ListenEvent <bundleID>`，再 `open -n` 重启（必须换进程，系统才会重新问一次）。
+   `tccutil` 改的是系统级 TCC 库，没管理员权限会失败，所以走授权弹窗。
+3. **`IOHIDManager` 必须关掉重开**：授权是在 open 那一刻定的。之前 `recheckKeyboard()` 只调
+   `refreshDevices()`，于是用户在系统设置里补上授权、回来点「重新检测」，界面还是一片安静。
+   现在 `tick()` 发现权限从没有变成有，或者用户点按钮，都走 `InputTap.restart()`。
+
+**排查用的命令**
+`--keyperm [秒]`：打印应用路径 / 签名 / Team / 副本 / 输入监控 / 事件层权限 / IOHID open 结果 /
+键盘设备，再实时听 N 秒并统计按键。远程排查让对方跑一条就够。
+注意：从终端直接跑时，TCC 可能把权限算在终端头上，结论以 app 内「复制诊断」为准。

@@ -46,15 +46,29 @@ public struct KeyboardHealth {
     public var hidEvents: Int
     public var tapEvents: Int
     public var lastKeyAt: Date?
+    /// IOHIDManager 这次 open 是否成功（成功但没事件 = 授权没真正生效）
+    public var managerOpen: Bool
+    /// 当前这份 app 的签名/路径身份，用于解释「开关开着却不生效」
+    public var signing: SigningInfo
 
     public init(state: State, access: InputTap.Access, keyboards: [String],
-                hidEvents: Int, tapEvents: Int, lastKeyAt: Date?) {
+                hidEvents: Int, tapEvents: Int, lastKeyAt: Date?,
+                managerOpen: Bool = false,
+                signing: SigningInfo = .current()) {
         self.state = state
         self.access = access
         self.keyboards = keyboards
         self.hidEvents = hidEvents
         self.tapEvents = tapEvents
         self.lastKeyAt = lastKeyAt
+        self.managerOpen = managerOpen
+        self.signing = signing
+    }
+
+    /// 能枚举到键盘设备，但一条事件都没收到，同时系统说没授权。
+    /// 这是「授权记录和当前 app 对不上」的典型样子（换机器、重编译、多副本）。
+    public var looksLikeStaleRecord: Bool {
+        state == .noAccess && !keyboards.isEmpty
     }
 
     public static let unknown = KeyboardHealth(state: .ok, access: .unknown, keyboards: [],
@@ -77,6 +91,8 @@ public final class Engine {
     public private(set) var lastKeyAt: Date?
     /// 事件层兜底是否在跑（看不到键盘 HID 设备时才会启用）
     public private(set) var isKeyTapActive = false
+    /// 当前这份 app 的签名/路径身份。TCC 授权绑在它上面，诊断时要摊开给人看。
+    public private(set) var signing = SigningInfo.current()
 
     public var onUpdate: (() -> Void)?
     public var onLiveEvent: ((LiveInputEvent) -> Void)?
@@ -348,8 +364,16 @@ public final class Engine {
     }
 
     private func tick() {
-        // 权限可能在用户去系统设置里改过
-        inputAccess = InputTap.access()
+        // 权限可能在用户去系统设置里改过。刚变成「有授权」时要把 IOHID 链路整个重建
+        // （open 那一刻就定了能不能读键盘，只刷设备列表是收不到事件的）
+        let access = InputTap.access()
+        if access != inputAccess {
+            inputAccess = access
+            if access == .granted {
+                input.restart()
+                ticksSinceDeviceScan = 0
+            }
+        }
         // 设备也会变：键盘刚连上 / 刚被授权时，设备要到下一次枚举才看得到。
         // 每 5 秒重扫一次，用户不用重启 app。
         ticksSinceDeviceScan += 1
@@ -417,12 +441,20 @@ public final class Engine {
         onUpdate?()
     }
 
-    /// 用户点「重新检测」：重扫设备 + 重读权限 + 重挂兜底链路
+    /// 用户点「重新检测」：重扫设备 + 重读权限 + 重挂兜底链路。
+    /// IOHIDManager 要整个关掉重开 —— 授权是 open 那一刻判定的，
+    /// 只刷新设备列表的话，界面会显示「已授权」但事件永远不进来。
     public func recheckKeyboard() {
-        input.refreshDevices()
+        let wasDenied = inputAccess != .granted
+        input.restart()
         inputAccess = InputTap.access()
+        signing = SigningInfo.current()
         updateKeyTapFallback()
+        ticksSinceDeviceScan = 0
         onUpdate?()
+        // 刚从「没授权」变成「有授权」，说明用户去系统设置开过又回来点了按钮，
+        // 这时候把兜底链路重挂一次，避免它还挂在老状态上
+        if wasDenied, inputAccess == .granted { updateKeyTapFallback() }
     }
 
     /// 键盘现在到底通不通 —— 设置页和顶部提示条都靠它说话
@@ -443,7 +475,9 @@ public final class Engine {
                               keyboards: names,
                               hidEvents: input.receivedEvents,
                               tapEvents: keyTap.events,
-                              lastKeyAt: lastKeyAt)
+                              lastKeyAt: lastKeyAt,
+                              managerOpen: input.isOpen,
+                              signing: signing)
     }
 
     public var storedDeviceNames: (keyboards: [String], mice: [String]) {

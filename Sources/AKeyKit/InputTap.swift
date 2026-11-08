@@ -92,6 +92,22 @@ public final class InputTap {
         isOpen = false
     }
 
+    /// 关掉重开。
+    ///
+    /// 授权是在 app 跑起来之后才给的时候，光 refreshDevices() 是不够的 ——
+    /// IOHIDManager 在 open 那一刻就把「能不能读键盘」定下来了，设备列表会更新，
+    /// 事件回调却不会开始送。所以用户点「重新检测」时整条链路重建一次，
+    /// 不用退出 app 再开。
+    @discardableResult
+    public func restart() -> Bool {
+        stop()
+        deviceKeys.removeAll()
+        pressed.removeAll()
+        lastCountedAt.removeAll()
+        countedUsages.removeAll()
+        return start()
+    }
+
     /// 重新枚举当前已授权的键鼠设备名
     public func refreshDevices() {
         guard let manager, let set = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else { return }

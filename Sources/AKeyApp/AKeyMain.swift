@@ -45,6 +45,13 @@ struct AKeyStatsMain {
             return
         }
 
+        // 开发用：一次性体检（签名身份 / 权限 / 设备 / 是否能收到键）
+        if let index = args.firstIndex(of: "--keyperm") {
+            let seconds = Double(args[safe: index + 1] ?? "8") ?? 8
+            KeyPermCLI.run(seconds: seconds)
+            return
+        }
+
         // 开发用：验证事件层兜底能收到按键（自己发一个 Control 按下，不打扰前台）
         if let index = args.firstIndex(of: "--keytap") {
             let seconds = Double(args[safe: index + 1] ?? "4") ?? 4
@@ -348,6 +355,24 @@ enum Snapshot {
             state.persistPreferences = false
             state.statsPeriod = period
         }
+        // 开发自检：伪造键盘体检状态，对提示条文案/版式用
+        if let env = ProcessInfo.processInfo.environment["AKS_KEY"] {
+            let keyboards = env == "hidden" ? [] : ["Apple Internal Keyboard / Trackpad"]
+            let healthState: KeyboardHealth.State = {
+                switch env {
+                case "hidden": return .hidden
+                case "taponly": return .tapOnly
+                default: return .noAccess
+                }
+            }()
+            state.injectKeyHealth(KeyboardHealth(state: healthState,
+                                                 access: env == "hidden" || env == "taponly" ? .granted : .denied,
+                                                 keyboards: keyboards,
+                                                 hidEvents: 0,
+                                                 tapEvents: env == "taponly" ? 12 : 0,
+                                                 lastKeyAt: nil,
+                                                 managerOpen: true))
+        }
 
         let isPanel = pageName == "panel"
         let isSheet = pageName == "videosheet"
@@ -435,6 +460,68 @@ extension Array {
 
 // MARK: - 事件层兜底自检
 //
+@MainActor
+enum KeyPermCLI {
+    static func run(seconds: Double) {
+        _ = NSApplication.shared
+        let info = SigningInfo.current()
+
+        print("A-Key-Stats \(AKSBundle.version) 键盘体检")
+        print("  应用路径  : \(info.pathNote)")
+        print("  BundleID  : \(info.bundleID)")
+        print("  签名      : \(info.identity)\(info.teamID.map { " · Team \($0)" } ?? "")")
+        print("  其他副本  : \(info.otherCopies.isEmpty ? "无" : info.otherCopies.joined(separator: "、"))")
+        if let note = SigningVerdict.note(info) { print("  ⚠️  \(note)") }
+        print("  输入监控  : \(accessText(InputTap.access()))")
+        print("  事件层权限: \(CGPreflightListenEventAccess() ? "有" : "无")")
+
+        let input = InputTap()
+        var downs: [(code: UInt16, device: String)] = []
+        input.onKeyDown = { code, device in downs.append((code, device)) }
+        let opened = input.start()
+        print("  IOHID open: \(opened ? "成功" : "失败")")
+        print("  键盘设备  : \(input.keyboardNames.isEmpty ? "（空）" : input.keyboardNames.joined(separator: "、"))")
+        print("  鼠标设备  : \(input.mouseNames.isEmpty ? "（空）" : input.mouseNames.joined(separator: "、"))")
+        print("")
+        print("请在这 \(Int(seconds)) 秒里敲几下键盘（Esc 也算）…")
+
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        input.stop()
+
+        print("")
+        if downs.isEmpty {
+            print("  收到按键  : 0 次 · HID 事件 \(input.receivedEvents)")
+            print("❌ HID 链路一条都没收到。")
+            if InputTap.access() != .granted {
+                print("   输入监控是 denied —— 去系统设置 → 隐私与安全性 → 输入监控，")
+                print("   把 A-Key-Stats 用「−」删掉，再启动 app 重新授权一次。")
+            } else {
+                print("   权限是 granted 却收不到键：检查键盘是否真的接在这台机器上。")
+            }
+            print("   提示：从终端直接跑时，系统有可能把权限算在终端头上，以 app 内「复制诊断」为准。")
+            exit(6)
+        }
+        let sample = downs.prefix(12)
+            .map { String(format: "0x%02X", $0.code) + "(\($0.device))" }
+            .joined(separator: " ")
+        print("  收到按键  : \(downs.count) 次 · HID 事件 \(input.receivedEvents)")
+        print("  样例      : \(sample)")
+        print("✅ HID 链路正常")
+        exit(0)
+    }
+
+    private static func accessText(_ access: InputTap.Access) -> String {
+        switch access {
+        case .granted: return "granted"
+        case .denied: return "denied"
+        case .unknown: return "unknown"
+        }
+    }
+}
+
 // 键盘被系统藏起来（或按键根本不是本机键盘发的）时，只有 CGEventTap 能看见。
 // 这里自己发一个 Control 按下/抬起，验证回调真的会被调用、键码取得对，
 // 不往输入焦点里塞可见字符。
@@ -670,7 +757,7 @@ enum SelfTest {
         let tap = InputTap()
         _ = tap.start()
         tap.refreshDevices()
-        print("键盘设备 : \(tap.keyboardNames.isEmpty ? "（空，多半是没授权）" : tap.keyboardNames.joined(separator: "、"))")
+        print("键盘设备 : \(tap.keyboardNames.isEmpty ? "（空，可能是键盘不在本机 / 未授权）" : tap.keyboardNames.joined(separator: "、"))")
         print("鼠标设备 : \(tap.mouseNames.isEmpty ? "（空）" : tap.mouseNames.joined(separator: "、"))")
 
         // 键盘设备为空时，事件层兜底能不能挂上，决定了还有没有救
