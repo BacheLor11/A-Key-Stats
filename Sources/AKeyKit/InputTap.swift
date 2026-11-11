@@ -22,6 +22,8 @@ public final class InputTap {
     /// 0 = 左键，1 = 右键，2 = 中键
     public var onMouseButton: ((Int, String) -> Void)?
     public var onMouseButtonUp: ((Int, String) -> Void)?
+    /// 指针相对位移（HID 原始点数，不是屏幕像素）。X 与 Y 分两次上报，另一次补 0。
+    public var onPointer: ((Double, Double, String) -> Void)?
     /// 原始 usage + 换算后的虚拟键码（nil 表示映射表里没有），调试/自校准用
     public var onRawKey: ((UInt16, UInt16?, String) -> Void)?
     /// 同一颗键在极短时间内被重复上报（已被去重），调试用
@@ -127,6 +129,31 @@ public final class InputTap {
         mouseNames = mice.sorted()
     }
 
+    /// 每台指针设备是否真的暴露了 X/Y 位移元素。
+    /// 有些「鼠标」在系统里只报按键，位移走蓝牙私有通道 —— 那种设备这里看不到。
+    public func pointerDevices() -> [(name: String, hasAxes: Bool)] {
+        guard let manager,
+              let set = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else { return [] }
+        var result: [(String, Bool)] = []
+        for device in set {
+            guard let page = IOHIDDeviceGetProperty(device, kIOHIDPrimaryUsagePageKey as CFString) as? Int,
+                  let usage = IOHIDDeviceGetProperty(device, kIOHIDPrimaryUsageKey as CFString) as? Int,
+                  page == 0x01, usage == 0x02 else { continue }
+            let name = (IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String) ?? "HID 设备"
+            var hasAxes = false
+            if let elements = IOHIDDeviceCopyMatchingElements(device, nil,
+                                                              IOOptionBits(kIOHIDOptionsTypeNone)) as? [IOHIDElement] {
+                for element in elements {
+                    let p = Int(IOHIDElementGetUsagePage(element))
+                    let u = Int(IOHIDElementGetUsage(element))
+                    if p == 0x01, u == 0x30 || u == 0x31 { hasAxes = true; break }
+                }
+            }
+            result.append((name, hasAxes))
+        }
+        return result
+    }
+
     // MARK: 回调
 
     /// 同一块物理键盘常被 IOHIDManager 匹配出多个设备对象（Keyboard / Keypad / 厂商接口），
@@ -195,6 +222,16 @@ public final class InputTap {
                     onKeyUp?(vk, deviceName)
                 }
             }
+            return
+        }
+
+        // 指针位移：usagePage 0x01，X = 0x30 / Y = 0x31，相对量。
+        // 鼠标有没有「跳一下」，只有这一层看得见 —— 事件层拿到的是已经加速过的光标位置。
+        if usagePage == 0x01, usage == 0x30 || usage == 0x31 {
+            let delta = Double(intValue)
+            guard delta != 0 else { return }
+            if usage == 0x30 { onPointer?(delta, 0, deviceName) }
+            else { onPointer?(0, delta, deviceName) }
             return
         }
 

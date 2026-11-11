@@ -59,6 +59,26 @@ struct AKeyStatsMain {
             return
         }
 
+        // 开发用：把外设信号跑一遍判定，看是哪台设备、差多少到门槛
+        if let index = args.firstIndex(of: "--hw") {
+            let days = Int(args[safe: index + 1] ?? "14") ?? 14
+            HardwareCLI.run(days: days)
+            return
+        }
+
+        // 开发用：判定器自测（喂合成事件，不碰真实数据）
+        if args.contains("--hwtest") {
+            HardwareCLI.selfTest()
+            return
+        }
+
+        // 开发用：确认鼠标位移到底有没有从 IOHID 出来（跳变检测的前提）
+        if let index = args.firstIndex(of: "--ptr") {
+            let seconds = Double(args[safe: index + 1] ?? "8") ?? 8
+            PointerCLI.run(seconds: seconds)
+            return
+        }
+
         // 开发用：不开窗，直接把全部触控板轨迹导成 CSV（验证流式解码 / 格式）
         if let index = args.firstIndex(of: "--export-traj") {
             let path = args[safe: index + 1] ?? "/tmp/aks-trajectory.csv"
@@ -325,6 +345,222 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - 外设信号自检
+
+/// 把磁盘上的信号跑一遍判定：每台设备收了多少样本、各指标多少次、
+/// 离门槛还差多少。排查「是不是硬件有毛病」时先看这个。
+@MainActor
+enum HardwareCLI {
+    static func run(days: Int) {
+        _ = NSApplication.shared
+        let keys = Array(Store.shared.availableDays().prefix(max(1, days)))
+        let list = keys.compactMap { Store.shared.load(day: $0) }
+        let today = DayKey.of(Date())
+
+        print("A-Key-Stats 外设信号 · 磁盘上的最近 \(list.count) 天（最多落后 20 秒）")
+        if let newest = list.first?.date, let oldest = list.last?.date {
+            print("范围: \(oldest) → \(newest)" + (newest == today ? "" : " · 今天还没落盘"))
+        }
+
+        let aggregates = HardwareWatch.aggregate(list)
+        guard !aggregates.isEmpty else {
+            print("还没有任何信号 —— 0.5.0 才开始记录，正常用一天再来看。")
+            exit(0)
+        }
+        for agg in aggregates {
+            print("\n\(agg.kind.title) · \(agg.device)")
+            print("  样本 \(agg.samples) 次 · \(agg.dayCount) 天有数据")
+            for metric in agg.metrics.keys.sorted() {
+                let name = metric.padding(toLength: 7, withPad: " ", startingAt: 0)
+                let rate = String(format: "%.2f", agg.rate(metric))
+                print("  \(name) \(agg.value(metric)) 次 · 每千次 \(rate) · \(agg.metricDays[metric] ?? 0) 天")
+            }
+        }
+
+        let findings = HardwareWatch.findings(list)
+        print("\n判定:")
+        if findings.isEmpty { print("  都还没到门槛（样本不足也算没到）") }
+        for finding in findings {
+            print("  [\(finding.level.rawValue)] \(finding.headline)")
+            print("    \(finding.detail)")
+            for row in finding.rows { print("    · \(row.label): \(row.value)") }
+            print("    → \(finding.advice)")
+        }
+        exit(0)
+    }
+
+    /// 合成事件自测：判定器写错一个比较符号，界面上是看不出来的。
+    static func selfTest() {
+        var failures: [String] = []
+
+        func check(_ name: String, expect: Int, _ actual: Int) {
+            if actual == expect {
+                print("  ✓ \(name) = \(actual)")
+            } else {
+                print("  ✗ \(name) = \(actual)，应为 \(expect)")
+                failures.append(name)
+            }
+        }
+
+        func value(_ probe: HardwareProbe, _ kind: PeripheralKind, _ device: String, _ metric: String) -> Int {
+            probe.day.devices[HardwareDay.key(kind: kind, name: device)]?.value(metric) ?? 0
+        }
+
+        // 1. 同一颗键 45ms 内两次 = 重复触发
+        let k1 = HardwareProbe()
+        k1.keyDown(0, device: "K")
+        Thread.sleep(forTimeInterval: 0.045)
+        k1.keyDown(0, device: "K")
+        check("键盘重复触发", expect: 1, value(k1, .keyboard, "K", Metric.keyChatter))
+
+        // 2. 打字后 120ms 内回删 = 立刻回删
+        let k2 = HardwareProbe()
+        k2.keyDown(0, device: "K")
+        Thread.sleep(forTimeInterval: 0.12)
+        k2.keyDown(51, device: "K")
+        check("打字后立刻回删", expect: 1, value(k2, .keyboard, "K", Metric.keyFix))
+
+        // 3. 连删三次再打字 = 重打
+        let k3 = HardwareProbe()
+        k3.keyDown(0, device: "K")
+        for _ in 0..<3 {
+            Thread.sleep(forTimeInterval: 0.08)
+            k3.keyDown(51, device: "K")
+        }
+        Thread.sleep(forTimeInterval: 0.10)
+        k3.keyDown(0, device: "K")
+        check("连删后重打", expect: 1, value(k3, .keyboard, "K", Metric.keyRewrite))
+
+        // 4. 鼠标：连续小位移后突然一个大跳，下一帧恢复正常
+        let m1 = HardwareProbe()
+        for _ in 0..<12 { m1.pointer(dx: 4, dy: 3, device: "M") }
+        m1.pointer(dx: 420, dy: 0, device: "M")
+        m1.pointer(dx: 4, dy: 3, device: "M")
+        check("鼠标跳点", expect: 1, value(m1, .mouse, "M", Metric.mouseJump))
+
+        // 4b. 快速甩动是「连续」大位移，不该当成跳点
+        let m3 = HardwareProbe()
+        for _ in 0..<12 { m3.pointer(dx: 5, dy: 2, device: "M") }
+        for _ in 0..<6 { m3.pointer(dx: 300, dy: 120, device: "M") }
+        for _ in 0..<3 { m3.pointer(dx: 5, dy: 2, device: "M") }
+        check("快速甩动不算跳点", expect: 0, value(m3, .mouse, "M", Metric.mouseJump))
+
+        // 5. 鼠标：连续移动中停 200ms 再继续 = 断流
+        let m2 = HardwareProbe()
+        for _ in 0..<8 { m2.pointer(dx: 3, dy: 2, device: "M") }
+        Thread.sleep(forTimeInterval: 0.20)
+        m2.pointer(dx: 3, dy: 2, device: "M")
+        check("鼠标断流", expect: 1, value(m2, .mouse, "M", Metric.mouseStall))
+
+        // 6. 触控板：单帧跳到板子另一头，下一帧继续正常移动
+        let t1 = HardwareProbe()
+        for i in 0..<10 {
+            t1.frame(device: "T", primary: (0.40 + Double(i) * 0.005, 0.50))
+        }
+        t1.frame(device: "T", primary: (0.78, 0.42))
+        t1.frame(device: "T", primary: (0.785, 0.42))
+        check("触控板单帧跳变", expect: 1, value(t1, .trackpad, "T", Metric.padJump))
+
+        // 6b. 快速滑动是连续大位移，不该当成跳变
+        let t3 = HardwareProbe()
+        for i in 0..<10 {
+            t3.frame(device: "T", primary: (0.20 + Double(i) * 0.005, 0.50))
+        }
+        for i in 0..<6 {
+            t3.frame(device: "T", primary: (0.30 + Double(i) * 0.06, 0.50))
+        }
+        t3.frame(device: "T", primary: (0.66, 0.50))
+        check("快速滑动不算跳变", expect: 0, value(t3, .trackpad, "T", Metric.padJump))
+
+        // 7. 触控板：手指没抬，报点断了 200ms
+        let t2 = HardwareProbe()
+        for i in 0..<8 {
+            t2.frame(device: "T", primary: (0.40 + Double(i) * 0.005, 0.50))
+        }
+        Thread.sleep(forTimeInterval: 0.20)
+        t2.frame(device: "T", primary: (0.45, 0.50))
+        check("触控板报点中断", expect: 1, value(t2, .trackpad, "T", Metric.padStall))
+
+        // 8. 判定门槛：样本不足时不该出结论
+        var day = DayStats(date: "2026-01-01")
+        var bucket = DeviceSignals(kind: .mouse, name: "M")
+        bucket.samples = 100
+        bucket.metrics[Metric.mouseJump] = 50
+        day.hardware.devices[HardwareDay.key(kind: .mouse, name: "M")] = bucket
+        check("样本不足不判定", expect: 0, HardwareWatch.findings([day]).count)
+
+        // 9. 编解码往返：hardware 字段要能存能读
+        if let data = try? JSONEncoder().encode(day),
+           let back = try? JSONDecoder().decode(DayStats.self, from: data),
+           back.hardware.devices.count == 1 {
+            print("  ✓ 编解码往返")
+        } else {
+            print("  ✗ 编解码往返")
+            failures.append("编解码往返")
+        }
+
+        // 10. 老数据（0.4.x 没有 hardware 字段）要能读
+        let old = #"{"date":"2026-01-01","keys":{"0":3},"hourly":[1],"clicks":{"left":2}}"#.data(using: .utf8)!
+        if let decoded = try? JSONDecoder().decode(DayStats.self, from: old),
+           decoded.keyTotal == 3, decoded.hardware.devices.isEmpty, decoded.hourly.count == 24 {
+            print("  ✓ 老数据兼容")
+        } else {
+            print("  ✗ 老数据兼容")
+            failures.append("老数据兼容")
+        }
+
+        print(failures.isEmpty ? "\n全部通过" : "\n失败 \(failures.count) 项：\(failures.joined(separator: "、"))")
+        exit(failures.isEmpty ? 0 : 1)
+    }
+}
+
+// MARK: - 指针位移自检
+
+/// 确认鼠标的位移报文到底有没有从 IOHID 出来。
+/// 跳变检测全靠这一路，如果这里一直 0，说明这只鼠标的位移不走 HID（蓝牙私有通道）。
+@MainActor
+enum PointerCLI {
+    static func run(seconds: Double) {
+        _ = NSApplication.shared
+        let tap = InputTap()
+        var counts: [String: Int] = [:]
+        var total = 0
+        tap.onPointer = { _, _, name in
+            counts[name, default: 0] += 1
+            total += 1
+        }
+        let ok = tap.start()
+        print("指针链路: \(ok ? "已打开" : "打不开")")
+        print("可见鼠标设备: \(tap.mouseNames.isEmpty ? "（空）" : tap.mouseNames.joined(separator: "、"))")
+
+        let devices = tap.pointerDevices()
+        if devices.isEmpty {
+            print("⚠️  没有带 X/Y 位移元素的指针设备 —— 这台机器的鼠标位移不走 IOHID，跳变检测拿不到数据")
+        } else {
+            for device in devices {
+                print("  \(device.name) · X/Y 位移元素\(device.hasAxes ? "有" : "没有（只报按键）")")
+            }
+        }
+
+        print("请移动鼠标 \(Int(seconds)) 秒…")
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        tap.stop()
+
+        if counts.isEmpty {
+            print("没收到任何位移报文")
+        } else {
+            for (name, count) in counts.sorted(by: { $0.value > $1.value }) {
+                print("  \(name): \(count) 条")
+            }
+            print(String(format: "合计 %d 条 · %.0f 条/秒", total, Double(total) / seconds))
+        }
+        exit(counts.isEmpty ? 5 : 0)
+    }
+}
+
 // MARK: - 离屏渲染（开发自检）
 
 @MainActor
@@ -372,6 +608,12 @@ enum Snapshot {
                                                  tapEvents: env == "taponly" ? 12 : 0,
                                                  lastKeyAt: nil,
                                                  managerOpen: true))
+        }
+
+        // 开发自检：伪造外设信号提示，对三个页面的版式
+        if let env = ProcessInfo.processInfo.environment["AKS_HW"],
+           let kind = PeripheralKind(rawValue: env) {
+            state.injectHardwareDemo(kind)
         }
 
         let isPanel = pageName == "panel"

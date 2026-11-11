@@ -106,6 +106,8 @@ public final class Engine {
     private let keyTap = KeyTap()
     private let pad = PadTap()
     private let lock = NSLock()
+    /// 外设信号判定（键盘重复触发、鼠标跳点、触控板断流）
+    private let probe = HardwareProbe()
 
     private var today: DayStats
     private var padWriter: TrajectoryWriter?
@@ -128,6 +130,7 @@ public final class Engine {
         store.migrateKeycodesIfNeeded()
         let key = DayKey.of(Date())
         today = store.load(day: key) ?? DayStats(date: key)
+        probe.reset(to: today.hardware)
         openWriters(for: key)
     }
 
@@ -147,20 +150,24 @@ public final class Engine {
 
         input.onKeyDown = { [weak self] code, device in
             self?.onLiveEvent?(LiveInputEvent(kind: .keyDown, code: code, device: device))
-            self?.recordKey(code)
+            self?.recordKey(code, device: device)
         }
         input.onKeyUp = { [weak self] code, device in
             self?.onLiveEvent?(LiveInputEvent(kind: .keyUp, code: code, device: device))
+            self?.recordKeyUp(code, device: device)
         }
         input.onDuplicateKey = { [weak self] code, device in
             self?.onLiveEvent?(LiveInputEvent(kind: .duplicateKey, code: code, device: device))
         }
         input.onMouseButton = { [weak self] index, device in
             self?.onLiveEvent?(LiveInputEvent(kind: .mouseDown, code: UInt16(max(0, index)), device: device))
-            self?.recordMouseButton(index)
+            self?.recordMouseButton(index, device: device)
         }
         input.onMouseButtonUp = { [weak self] index, device in
             self?.onLiveEvent?(LiveInputEvent(kind: .mouseUp, code: UInt16(max(0, index)), device: device))
+        }
+        input.onPointer = { [weak self] dx, dy, device in
+            self?.recordPointer(dx: dx, dy: dy, device: device)
         }
         _ = input.start()
 
@@ -168,11 +175,12 @@ public final class Engine {
         keyTap.onKeyDown = { [weak self] code in
             guard let self, self.input.keyboardNames.isEmpty else { return }
             self.onLiveEvent?(LiveInputEvent(kind: .keyDown, code: code, device: KeyTap.deviceName))
-            self.recordKey(code)
+            self.recordKey(code, device: KeyTap.deviceName)
         }
         keyTap.onKeyUp = { [weak self] code in
             guard let self, self.input.keyboardNames.isEmpty else { return }
             self.onLiveEvent?(LiveInputEvent(kind: .keyUp, code: code, device: KeyTap.deviceName))
+            self.recordKeyUp(code, device: KeyTap.deviceName)
         }
         updateKeyTapFallback()
 
@@ -228,7 +236,7 @@ public final class Engine {
         lastEventAt = now
     }
 
-    private func recordKey(_ code: UInt16) {
+    private func recordKey(_ code: UInt16, device: String) {
         guard !isPaused else { return }
         lastKeyAt = Date()
         lock.lock()
@@ -236,11 +244,19 @@ public final class Engine {
         today.keys[String(code), default: 0] += 1
         let hour = DayKey.hour(of: Date())
         if hour >= 0, hour < 24 { today.hourly[hour] += 1 }
+        probe.keyDown(code, device: device)
         markActive()
         lock.unlock()
     }
 
-    private func recordMouseButton(_ index: Int) {
+    private func recordKeyUp(_ code: UInt16, device: String) {
+        guard !isPaused else { return }
+        lock.lock()
+        probe.keyUp(code, device: device)
+        lock.unlock()
+    }
+
+    private func recordMouseButton(_ index: Int, device: String) {
         guard !isPaused else { return }
         lock.lock()
         rolloverIfNeeded()
@@ -250,8 +266,25 @@ public final class Engine {
         case 2: today.clicks.middle += 1
         default: break
         }
+        probe.click(device: device, index: index)
         markActive()
         lock.unlock()
+    }
+
+    /// 指针位移：只喂给「鼠标」。触控板自己也有指针报文（和 MT 帧重复），要排掉。
+    private func recordPointer(dx: Double, dy: Double, device: String) {
+        guard !isPaused else { return }
+        guard !isTrackpadPointer(device) else { return }
+        lock.lock()
+        rolloverIfNeeded()
+        probe.pointer(dx: dx, dy: dy, device: device)
+        lock.unlock()
+    }
+
+    private func isTrackpadPointer(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        if lower.contains("trackpad") || name.contains("触控板") { return true }
+        return pad.devices.contains { $0.name == name && $0.kind != .mouse }
     }
 
     private func recordScroll(from event: NSEvent) {
@@ -322,6 +355,10 @@ public final class Engine {
                 fingerLast[contact.id] = (x, y)
             }
         }
+        // 触控板报点质量：主接触点（面积最大的那个）
+        if !isMouse, let primary = contacts.max(by: { $0.size < $1.size }) {
+            probe.frame(device: info.displayName, primary: (primary.x, primary.y))
+        }
         markActive()
         lock.unlock()
     }
@@ -347,6 +384,7 @@ public final class Engine {
         padWriter?.close()
         mouseWriter?.close()
         today = store.load(day: key) ?? DayStats(date: key)
+        probe.reset(to: today.hardware)
         openWriters(for: key)
         fingerLast.removeAll()
         trajectoryVersion &+= 1
@@ -355,6 +393,7 @@ public final class Engine {
     public func flush() {
         lock.lock()
         rolloverIfNeeded()
+        today.hardware = probe.day
         let snapshot = today
         padWriter?.flush()
         mouseWriter?.flush()
@@ -401,6 +440,7 @@ public final class Engine {
     public func snapshot() -> DayStats {
         lock.lock()
         defer { lock.unlock() }
+        today.hardware = probe.day
         return today
     }
 
@@ -425,6 +465,7 @@ public final class Engine {
         store.resetAll()
         let key = DayKey.of(Date())
         today = DayStats(date: key)
+        probe.reset()
         fingerLast.removeAll()
         openWriters(for: key)
         lock.unlock()

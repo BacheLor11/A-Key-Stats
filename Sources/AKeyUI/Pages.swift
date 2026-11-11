@@ -298,6 +298,10 @@ struct KeyboardPage: View {
                     )
                 )
 
+                if let note = state.hardwareNote(for: .keyboard) {
+                    HardwareNote(finding: note)
+                }
+
                 AKSCard(padding: 20) {
                     VStack(alignment: .leading, spacing: 14) {
                         KeyboardHeatView(layout: state.layout, counts: state.today.keys)
@@ -367,6 +371,10 @@ struct TrackpadPage: View {
                         }
                     )
                 )
+
+                if let note = state.hardwareNote(for: .trackpad) {
+                    HardwareNote(finding: note)
+                }
 
                 HStack(alignment: .top, spacing: 18) {
                     AKSCard(padding: 18) {
@@ -526,6 +534,10 @@ struct MousePage: View {
                     title: "鼠标也不只是点了多少下",
                     lede: "Magic Mouse 整块上表面都是电容面，接触点同样能读到。"
                 )
+
+                if let note = state.hardwareNote(for: .mouse) {
+                    HardwareNote(finding: note)
+                }
 
                 HStack(alignment: .top, spacing: 18) {
                     AKSCard(padding: 18) {

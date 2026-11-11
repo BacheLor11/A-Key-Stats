@@ -85,6 +85,11 @@ public final class AppState: ObservableObject {
     /// 被去重挡掉的重复上报（键盘一次按下发了两遍的情况）
     @Published public private(set) var dedupedKeyEvents = 0
     @Published public private(set) var unmappedKeyCount = 0
+    /// 外设硬件信号判定结果（键盘/鼠标/触控板各最多一条）。
+    /// 平时是空的 —— 没有异常就不该有任何入口。
+    @Published public private(set) var hardwareFindings: [PeripheralKind: HardwareFinding] = [:]
+    /// 用户点过「知道了」的提示（本次运行内不再出现）
+    @Published public private(set) var dismissedHardwareNotes: Set<String> = []
     /// 轨迹导出的一行结果提示
     @Published public private(set) var trajectoryExportNote: String?
     @Published public private(set) var isExportingTrajectory = false
@@ -214,6 +219,20 @@ public final class AppState: ObservableObject {
         trajectoryBytes = engine.trajectoryBytes()
         dedupedKeyEvents = engine.dedupedKeyEvents
         unmappedKeyCount = engine.unmappedKeyUsages.values.reduce(0, +)
+        let findings = HardwareWatch.findings(recentDays)
+        // 同类设备可能不止一台（两块键盘、两只鼠标），每页只留最严重的一条。
+        // 不能用 Dictionary(uniqueKeysWithValues:) —— 同 key 会直接 trap。
+        var byKind: [PeripheralKind: HardwareFinding] = [:]
+        for finding in findings {
+            if let existing = byKind[finding.kind] {
+                if existing.level == .notice, finding.level == .warning {
+                    byKind[finding.kind] = finding
+                }
+            } else {
+                byKind[finding.kind] = finding
+            }
+        }
+        hardwareFindings = byKind
         rebuildPeriods(todayStats: snapshot)
 
         if engine.trajectoryVersion != lastTrajectoryVersion {
@@ -318,6 +337,16 @@ public final class AppState: ObservableObject {
     public func recheckKeyboard() {
         engine.recheckKeyboard()
         refresh()
+    }
+
+    /// 某一页要不要显示硬件提示（平时都是 nil）
+    public func hardwareNote(for kind: PeripheralKind) -> HardwareFinding? {
+        guard let finding = hardwareFindings[kind] else { return nil }
+        return dismissedHardwareNotes.contains(finding.id) ? nil : finding
+    }
+
+    public func dismissHardwareNote(_ id: String) {
+        dismissedHardwareNotes.insert(id)
     }
 
     /// 清掉本 app 的「输入监控」授权记录（要管理员密码）。
@@ -538,6 +567,44 @@ public final class AppState: ObservableObject {
     /// 仅供离屏渲染/自检：伪造键盘体检结果，用来对提示条和设置页的版式
     public func injectKeyHealth(_ health: KeyboardHealth) {
         keyHealth = health
+        frozen = true
+    }
+
+    /// 仅供离屏渲染：伪造一条硬件提示，用来对三个页面的版式
+    public func injectHardwareDemo(_ kind: PeripheralKind) {
+        let finding: HardwareFinding
+        switch kind {
+        case .keyboard:
+            finding = HardwareFinding(
+                kind: .keyboard, device: "Apple Magic Keyboard", level: .warning,
+                headline: "键盘可能在重复触发：Apple Magic Keyboard",
+                detail: "同一颗键在 70 毫秒内被按下两次 —— 这比人手快到极限还快，通常是轴体/薄膜开关在抖动，多出来的那个字符只能手动删掉。",
+                rows: [.init(label: "重复触发", value: "28 次 · 4 天"),
+                       .init(label: "打字后立刻回删", value: "612 次（5.8%）"),
+                       .init(label: "连删后重打", value: "96 次"),
+                       .init(label: "样本", value: "105,420 次按键 · 6 天")],
+                advice: "换一根线或换一台机器对比一天；蓝牙键盘把接收器/扩展坞挪远一点再看。")
+        case .mouse:
+            finding = HardwareFinding(
+                kind: .mouse, device: "Apple Magic Mouse", level: .warning,
+                headline: "鼠标指针出现了跳变：Apple Magic Mouse",
+                detail: "统计到单次位移远超近期水平的跳点，以及连续移动中 120–600 毫秒的断流。传感器进灰、无线链路被干扰、USB 供电不稳都会是这个样子 —— 光标顿一下，然后跳过去。",
+                rows: [.init(label: "光标跳点", value: "37 次 · 每千次 0.90"),
+                       .init(label: "移动中断", value: "52 次"),
+                       .init(label: "连击抖动", value: "6 次"),
+                       .init(label: "样本", value: "41,280 次报文 · 6 天")],
+                advice: "先换一个 USB 口、去掉扩展坞试一天；2.4G 接收器别和 USB 3 设备挤在一起。只统计位移，不记录光标位置。")
+        case .trackpad:
+            finding = HardwareFinding(
+                kind: .trackpad, device: "Magic Trackpad", level: .notice,
+                headline: "触控板报点不太稳：Magic Trackpad",
+                detail: "出现了单帧跨越板面一大块的跳变，或者手指还在板上、报点却断了 120 毫秒以上。可能是排线、静电，也可能只是手掌压到了边缘。",
+                rows: [.init(label: "单帧跳变", value: "26 次"),
+                       .init(label: "报点中断", value: "18 次"),
+                       .init(label: "样本", value: "186,402 帧 · 5 天")],
+                advice: "擦一遍表面、拔掉电源再试；如果只在某个位置复现，记下时间点去售后。")
+        }
+        hardwareFindings = [kind: finding]
         frozen = true
     }
 

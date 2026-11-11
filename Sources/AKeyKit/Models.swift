@@ -81,6 +81,8 @@ public struct DayStats: Codable, Equatable {
     public var mouseContacts: Int
     public var padMaxContact: Double           // 接触面积峰值
     public var activeSeconds: Int
+    /// 外设信号（只存计数，见 HardwareWatch）。老文件里没有这一段。
+    public var hardware: HardwareDay
 
     public init(date: String) {
         self.date = date
@@ -95,6 +97,33 @@ public struct DayStats: Codable, Equatable {
         mouseContacts = 0
         padMaxContact = 0
         activeSeconds = 0
+        hardware = HardwareDay()
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case date, keys, hourly, clicks, padGrid, mouseGrid
+        case padTravel, mouseTravel, padContacts, mouseContacts, padMaxContact
+        case activeSeconds, hardware
+    }
+
+    /// 手写解码：0.5.0 之前的数据文件里没有 hardware，缺字段不能让整份数据崩掉。
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        date = try c.decode(String.self, forKey: .date)
+        keys = try c.decodeIfPresent([String: Int].self, forKey: .keys) ?? [:]
+        var hours = try c.decodeIfPresent([Int].self, forKey: .hourly) ?? []
+        if hours.count < 24 { hours += [Int](repeating: 0, count: 24 - hours.count) }
+        hourly = Array(hours.prefix(24))
+        clicks = try c.decodeIfPresent(ClickStats.self, forKey: .clicks) ?? ClickStats()
+        padGrid = try c.decodeIfPresent(HeatGrid.self, forKey: .padGrid) ?? HeatGrid()
+        mouseGrid = try c.decodeIfPresent(HeatGrid.self, forKey: .mouseGrid) ?? HeatGrid()
+        padTravel = try c.decodeIfPresent(Double.self, forKey: .padTravel) ?? 0
+        mouseTravel = try c.decodeIfPresent(Double.self, forKey: .mouseTravel) ?? 0
+        padContacts = try c.decodeIfPresent(Int.self, forKey: .padContacts) ?? 0
+        mouseContacts = try c.decodeIfPresent(Int.self, forKey: .mouseContacts) ?? 0
+        padMaxContact = try c.decodeIfPresent(Double.self, forKey: .padMaxContact) ?? 0
+        activeSeconds = try c.decodeIfPresent(Int.self, forKey: .activeSeconds) ?? 0
+        hardware = try c.decodeIfPresent(HardwareDay.self, forKey: .hardware) ?? HardwareDay()
     }
 
     public var keyTotal: Int { keys.values.reduce(0, +) }
